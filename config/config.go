@@ -5,6 +5,7 @@ type AppConfig struct {
 	Users  map[string]string `json:"Users"`  // 用户名 -> bcrypt加密的密码
 	Serial SerialConfig      `json:"Serial"` // 串口配置
 	OIDC   *OIDCConfig       `json:"OIDC"`   // OIDC配置（可选）
+	MQTT   MQTTConfig        `json:"MQTT"`
 }
 
 // JWTConfig JWT配置
@@ -15,7 +16,24 @@ type JWTConfig struct {
 
 // SerialConfig 串口配置
 type SerialConfig struct {
-	Port string `json:"Port"` // 串口路径，为空则自动检测
+	Port                string   `json:"Port"` // 串口路径，为空则自动检测
+	Disabled            bool     `json:"Disabled"`
+	Ports               []string `json:"Ports"`
+	ScanIntervalSeconds int      `json:"ScanIntervalSeconds"`
+}
+
+type MQTTConfig struct {
+	Enabled        bool   `json:"Enabled"`
+	Broker         string `json:"Broker"`
+	Username       string `json:"Username"`
+	Password       string `json:"Password"`
+	ClientID       string `json:"ClientID"`
+	TLS            bool   `json:"TLS"`
+	CAFile         string `json:"CAFile"`
+	TopicPrefix    string `json:"TopicPrefix"`
+	PrivateKeyFile string `json:"PrivateKeyFile"`
+	KeyID          string `json:"KeyID"`
+	OfflineSeconds int    `json:"OfflineSeconds"`
 }
 
 // OIDCConfig OIDC认证配置

@@ -1,62 +1,41 @@
-import {useEffect} from 'react';
+import {useEffect, useRef} from 'react';
 import {useNavigate, useSearchParams} from 'react-router-dom';
-import {oidcLogin} from '@/api/auth.ts';
+import {useQueryClient} from '@tanstack/react-query';
+import {oidcLogin, type LoginResponse} from '@/api/auth';
 import {toast} from 'sonner';
 
-const OIDCCallback = () => {
+export default function OIDCCallback() {
     const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
-
+    const [params] = useSearchParams();
+    const client = useQueryClient();
+    const request = useRef<{key: string; promise: Promise<LoginResponse>} | null>(null);
+    const code = params.get('code');
+    const state = params.get('state');
+    const error = params.get('error');
+    const description = params.get('error_description');
     useEffect(() => {
-        const handleCallback = async () => {
-            // 检查是否有错误参数
-            const error = searchParams.get('error');
-            if (error) {
-                const errorDescription = searchParams.get('error_description');
-                const errorMessage = errorDescription
-                    ? decodeURIComponent(errorDescription)
-                    : `认证失败: ${error}`;
-                toast.error(errorMessage);
-                navigate('/login');
-                return;
-            }
-
-            const code = searchParams.get('code');
-            const state = searchParams.get('state');
-
-            if (!code || !state) {
-                toast.error('缺少认证参数');
-                navigate('/login');
-                return;
-            }
-
-            try {
-                const response = await oidcLogin(code, state);
-                const {token, username} = response;
-
-                // 保存到 localStorage
-                localStorage.setItem('token', token);
-                localStorage.setItem('username', username);
-
-                toast.success('登录成功');
-                navigate('/');
-            } catch (error: any) {
-                toast.error(error.response?.data?.error || 'OIDC 认证失败');
-                navigate('/login');
-            }
-        };
-
-        handleCallback();
-    }, [searchParams, navigate]);
-
-    return (
-        <div className="min-h-screen flex items-center justify-center">
-            <div className="text-center">
-                <div className="text-lg mb-2">正在处理 OIDC 认证...</div>
-                <div className="text-gray-500">请稍候</div>
-            </div>
-        </div>
-    );
-};
-
-export default OIDCCallback;
+        if (error || !code || !state) {
+            toast.error(description || error || '缺少认证参数');
+            navigate('/login', {replace: true});
+            return;
+        }
+        let cancelled = false;
+        const key = `${code}:${state}`;
+        // Reuse the exchange in StrictMode rather than consuming an OIDC code twice.
+        if (request.current?.key !== key) request.current = {key, promise: oidcLogin(code, state)};
+        void request.current.promise.then((result) => {
+            if (cancelled) return;
+            client.clear();
+            localStorage.setItem('token', result.token);
+            localStorage.setItem('username', result.username);
+            toast.success('登录成功');
+            navigate('/devices', {replace: true});
+        }).catch((reason: unknown) => {
+            if (cancelled) return;
+            toast.error(reason instanceof Error ? reason.message : 'OIDC 认证失败');
+            navigate('/login', {replace: true});
+        });
+        return () => {cancelled = true;};
+    }, [code, state, error, description, navigate, client]);
+    return <main className="grid min-h-screen place-items-center bg-[#f3f6f9]"><p className="text-sm text-slate-500">正在验证登录身份…</p></main>;
+}

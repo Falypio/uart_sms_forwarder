@@ -1,3 +1,6 @@
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
 import {useState} from 'react';
 import {Calendar, CheckCircle2, Clock, Edit, Loader2, MessageSquare, Phone, Play, Plus, Trash2, XCircle} from 'lucide-react';
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query';
@@ -48,6 +51,7 @@ const EMPTY_FORM: TaskFormData = {
 };
 
 const getErrorMessage = (error: unknown, fallback: string) => {
+    if (error instanceof Error) return error.message;
     if (error && typeof error === 'object' && 'response' in error) {
         const response = (error as {response?: {data?: {error?: unknown}}}).response;
         if (typeof response?.data?.error === 'string') return response.data.error;
@@ -69,15 +73,17 @@ const lastRunDisplay = (status?: LastRunStatus) => {
 };
 
 export default function ScheduledTasksConfig() {
+    const {deviceId, device, isActive} = useDevice();
     const queryClient = useQueryClient();
     const [editorOpen, setEditorOpen] = useState(false);
     const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
     const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
     const [formData, setFormData] = useState<TaskFormData>({...EMPTY_FORM});
 
-    const {data: tasks = [], isLoading} = useQuery({
-        queryKey: ['scheduledTasks'],
-        queryFn: getScheduledTasks,
+    const {data: tasks = [], isLoading, isError, error, refetch} = useQuery({
+        queryKey: deviceKey(deviceId, 'scheduledTasks'),
+        queryFn: ({signal}) => getScheduledTasks(deviceId, signal),
+        refetchInterval: 10000,
     });
 
     const closeEditor = () => {
@@ -87,52 +93,64 @@ export default function ScheduledTasksConfig() {
     };
 
     const createMutation = useMutation({
-        mutationFn: createScheduledTask,
+        mutationFn: (task: TaskFormData) => createScheduledTask(deviceId, task),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({queryKey: ['scheduledTasks']});
+            if (!isActive()) return;
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'scheduledTasks')});
+            if (!isActive()) return;
             closeEditor();
             toast.success('任务创建成功');
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('创建任务失败:', error);
             toast.error(getErrorMessage(error, '创建任务失败'));
         },
     });
 
     const updateMutation = useMutation({
-        mutationFn: ({id, task}: {id: string; task: TaskFormData}) => updateScheduledTask(id, task),
+        mutationFn: ({id, task}: {id: string; task: TaskFormData}) => updateScheduledTask(deviceId, id, task),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({queryKey: ['scheduledTasks']});
+            if (!isActive()) return;
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'scheduledTasks')});
+            if (!isActive()) return;
             closeEditor();
             toast.success('任务更新成功');
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('更新任务失败:', error);
             toast.error(getErrorMessage(error, '更新任务失败'));
         },
     });
 
     const deleteMutation = useMutation({
-        mutationFn: deleteScheduledTask,
+        mutationFn: (id: string) => deleteScheduledTask(deviceId, id),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({queryKey: ['scheduledTasks']});
+            if (!isActive()) return;
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'scheduledTasks')});
+            if (!isActive()) return;
             setConfirmation(null);
             toast.success('任务删除成功');
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('删除任务失败:', error);
             toast.error(getErrorMessage(error, '删除任务失败'));
         },
     });
 
     const triggerMutation = useMutation({
-        mutationFn: triggerScheduledTask,
+        mutationFn: (id: string) => triggerScheduledTask(deviceId, id),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({queryKey: ['scheduledTasks']});
+            if (!isActive()) return;
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'scheduledTasks')});
+            if (!isActive()) return;
             setConfirmation(null);
-            toast.success('任务已触发执行');
+            toast.success('任务请求已提交，等待设备回报', {description: device.name || deviceId});
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('触发任务失败:', error);
             toast.error(getErrorMessage(error, '触发任务失败'));
         },
@@ -191,6 +209,8 @@ export default function ScheduledTasksConfig() {
             createMutation.mutate(normalized);
         }
     };
+
+    if (isError) return <QueryError error={error} retry={() => void refetch()}/>;
 
     if (isLoading) {
         return (
@@ -280,7 +300,7 @@ export default function ScheduledTasksConfig() {
                                         variant="outline"
                                         size="sm"
                                         onClick={() => setConfirmation({type: 'trigger', task})}
-                                        disabled={triggering}
+                                        disabled={triggering || !device.online}
                                         className="text-xs font-medium hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
                                     >
                                         {triggering ? <Loader2 className="size-3.5 animate-spin"/> : <Play className="size-3.5"/>}

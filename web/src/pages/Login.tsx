@@ -1,3 +1,4 @@
+import {useQueryClient} from '@tanstack/react-query';
 import {type FormEvent, useEffect, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {ArrowRight, KeyRound, LoaderCircle, Lock, RadioTower, ShieldCheck, User, Zap} from 'lucide-react';
@@ -19,6 +20,7 @@ export default function Login() {
     const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
     const [configLoading, setConfigLoading] = useState(true);
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
 
     useEffect(() => {
         getAuthConfig()
@@ -37,10 +39,11 @@ export default function Login() {
         setLoading(true);
         try {
             const response = await loginApi({username, password});
+            queryClient.clear();
             localStorage.setItem('token', response.token);
             localStorage.setItem('username', response.username);
             toast.success('登录成功');
-            navigate('/');
+            navigate('/devices', {replace: true});
         } catch (error) {
             toast.error('登录失败：' + (error instanceof Error ? error.message : '未知错误'));
         } finally {
@@ -68,7 +71,7 @@ export default function Login() {
                             <img src="/logo.png" alt="" className="size-8"/>
                         </div>
                         <div>
-                            <p className="text-sm font-semibold tracking-wide">UART Messenger</p>
+                            <p className="text-sm font-semibold tracking-wide">SMS 设备管理中心</p>
                             <p className="mt-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-500">Device Console</p>
                         </div>
                     </div>
@@ -96,7 +99,7 @@ export default function Login() {
                     </div>
 
                     <div className="relative z-10 flex items-center justify-between text-[11px] text-slate-600">
-                        <span>UART SMS FORWARDER</span>
+                        <span>SMS 设备管理中心</span>
                         <span>SECURE ACCESS</span>
                     </div>
                 </section>
@@ -108,7 +111,7 @@ export default function Login() {
                                 <img src="/logo.png" alt="" className="size-8"/>
                             </div>
                             <div>
-                                <p className="text-sm font-bold text-slate-900">UART Messenger</p>
+                                <p className="text-sm font-bold text-slate-900">SMS 设备管理中心</p>
                                 <p className="text-[10px] uppercase tracking-[0.17em] text-slate-400">Device Console</p>
                             </div>
                         </div>

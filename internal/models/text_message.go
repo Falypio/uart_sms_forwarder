@@ -14,10 +14,12 @@ const (
 	MessageStatusSending  MessageStatus = "sending"  // 发送中
 	MessageStatusSent     MessageStatus = "sent"     // 发送成功
 	MessageStatusFailed   MessageStatus = "failed"   // 发送失败
+	MessageStatusUnknown  MessageStatus = "unknown"  // 结果不确定，不自动重发
 )
 
 // TextMessage 短信记录
 type TextMessage struct {
+	DeviceID  string        `gorm:"index;not null" json:"deviceId"`
 	ID        string        `gorm:"primaryKey" json:"id"`                  // UUID
 	From      string        `gorm:"index" json:"from"`                     // 发送方号码
 	To        string        `gorm:"index" json:"to"`                       // 接收方号码

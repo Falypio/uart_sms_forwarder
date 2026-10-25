@@ -19,7 +19,7 @@ App:
     Secret: ""
     ExpiresHours: 168 # 7天
   Users:
-    # 使用 Bcrypt 加密，默认密码为 admin123，建议首次登录后修改密码，搜索 bcrypt在线加密网站 即可
+    # 使用 bcrypt 哈希；示例密码为 admin123，部署前用 htpasswd -nB -C 12 admin 生成并替换
     admin: "$2y$12$7DXcOiX1D59xNTIn5riUKusAPLP88LxxoczWmUT83MBj5EFznbp8a"
   OIDC:
     Enabled: false
@@ -30,5 +30,20 @@ App:
 
   # 串口配置
   Serial:
-    # 留空则自动检测，建议首次启动后手动指定
+    # 容器中可见的所有串口会在启动及定时扫描；显式 Ports 优先于 Port。
+    Disabled: false
     Port: ""
+    Ports: []
+    ScanIntervalSeconds: 10
+  MQTT:
+    Enabled: true
+    Broker: "tcp://sms_mqtt:1883"
+    ClientID: "sms_backend"
+    Username: "sms_backend"
+    Password: "REPLACE_WITH_STRONG_BACKEND_PASSWORD"
+    TLS: false
+    CAFile: ""
+    TopicPrefix: "sms/v1/devices"
+    PrivateKeyFile: "./data/keys/server_private.pem"
+    KeyID: "server-key-1"
+    OfflineSeconds: 180

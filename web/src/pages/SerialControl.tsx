@@ -1,4 +1,12 @@
-import type {ReactNode} from 'react';
+import {describeOperator} from '@/utils/operator';
+import {useState, type ReactNode} from 'react';
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
+import SensitiveValue from '@/components/SensitiveValue';
+import CommandHistory from '@/components/CommandHistory';
+import LocateButton from '@/components/LocateButton';
+import {Input} from '@/components/ui/input';
 import {Activity, Loader2, MessageSquareText, RotateCcw, Signal} from 'lucide-react';
 import {Link} from 'react-router-dom';
 import {toast} from 'sonner';
@@ -51,46 +59,62 @@ function StatusTile({label, value, tone = 'slate'}: StatusTileProps) {
 }
 
 export default function SerialControl() {
+    const {deviceId, device, isActive} = useDevice();
+    const [flightSeconds, setFlightSeconds] = useState('60');
+    const isMqtt = device.accessMode === 'mqtt';
+    const duration = Number(flightSeconds);
+    const validDuration = Number.isInteger(duration) && duration >= 1 && duration <= 86400;
     const {
         data: deviceStatus,
         isFetching,
         isLoading,
+        isError,
+        error,
         refetch: refetchStatus,
     } = useQuery({
-        queryKey: ['deviceStatus'],
-        queryFn: async () => {
-            const res = await serialApi.getStatus();
+        queryKey: deviceKey(deviceId, 'status'),
+        queryFn: async ({signal}) => {
+            const res = await serialApi.getStatus(deviceId, signal);
             return res as DeviceStatus;
         },
         refetchInterval: 10000,
     });
 
     const setFlymodeMutation = useMutation({
-        mutationFn: (enabled: boolean) => serialApi.setFlymode(enabled),
+        mutationFn: (enabled: boolean) => serialApi.setFlymode(deviceId, enabled, isMqtt && enabled ? duration : undefined),
         onSuccess: () => {
-            toast.success('设置成功');
+            if (!isActive()) return;
+            toast.success('飞行模式请求已提交', {description: device.name || deviceId});
             refetchStatus();
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('操作失败:', error);
-            toast.error('操作失败');
+            toast.error(error.message || '提交失败');
         },
     });
 
     const rebootMcuMutation = useMutation({
-        mutationFn: () => serialApi.rebootMcu(),
+        mutationFn: () => serialApi.rebootMcu(deviceId),
         onSuccess: () => {
-            toast.success('模块重启命令已发送');
+            if (!isActive()) return;
+            toast.success('模块重启请求已提交', {description: device.name || deviceId});
             refetchStatus();
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('操作失败:', error);
-            toast.error('操作失败');
+            toast.error(error.message || '提交失败');
         },
     });
 
+    const resetMutation = useMutation({
+        mutationFn: () => serialApi.resetStack(deviceId),
+        onSuccess: () => {if (isActive()) {toast.success('协议栈重置请求已提交', {description: device.name || deviceId}); void refetchStatus();}},
+        onError: (error) => {if (isActive()) toast.error(error.message);},
+    });
     const mobile = deviceStatus?.mobile;
-    const connected = Boolean(deviceStatus?.connected);
+    const connected = Boolean(!isError && deviceStatus?.connected);
     const unavailable = '—';
     const displaySignal = (value?: number, unit = '') => connected && value ? `${value}${unit}` : unavailable;
     const registrationText = !connected
@@ -109,10 +133,11 @@ export default function SerialControl() {
     return (
         <div>
             <PageHeader
-                title="串口控制"
+                title="设备控制"
                 description="查看移动网络与模块状态，或执行设备控制命令。"
             />
 
+            {isError && <QueryError error={error} retry={() => void refetchStatus()}/>}
             <div className="mt-6 grid items-start gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
                 <Card className="gap-0 overflow-hidden py-0">
                     <CardHeader className="border-b border-slate-100 py-5">
@@ -122,7 +147,7 @@ export default function SerialControl() {
                                     <Signal className="size-4 text-blue-600"/>
                                     网络与设备状态
                                 </CardTitle>
-                                <p className="mt-1.5 text-xs text-slate-500">蜂窝网络、信号参数与串口模块信息</p>
+                                <p className="mt-1.5 text-xs text-slate-500">蜂窝网络、信号参数与当前模组信息</p>
                             </div>
                             <span className={cn(
                                 'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold',
@@ -157,7 +182,7 @@ export default function SerialControl() {
                                     />
                                     <StatusTile
                                         label="运营商"
-                                        value={connected ? mobile?.operator || unavailable : unavailable}
+                                        value={connected ? describeOperator(mobile) : unavailable}
                                         tone={connected ? 'blue' : 'slate'}
                                     />
                                     <StatusTile
@@ -187,8 +212,8 @@ export default function SerialControl() {
                                 <section className="mt-5 border-t border-slate-100 pt-4">
                                     <h3 className="mb-1 text-xs font-bold text-slate-800">模块信息</h3>
                                     <dl className="grid gap-x-8 sm:grid-cols-2">
-                                        <InfoRow label="串口设备" value={connected ? deviceStatus?.port_name || unavailable : unavailable} mono/>
-                                        <InfoRow label="固件版本" value={connected ? deviceStatus?.version || unavailable : unavailable} mono/>
+                                        <InfoRow label="接入方式" value={isMqtt ? "蜂窝 MQTT" : deviceStatus?.port_name || "USB 串口"} mono/>
+                                        <InfoRow label="固件版本" value={device.features?.firmware || unavailable} mono/>
                                         <InfoRow
                                             label="设备时间"
                                             value={connected && deviceStatus?.timestamp
@@ -205,7 +230,7 @@ export default function SerialControl() {
                                         />
                                         <InfoRow
                                             label="本机号码"
-                                            value={connected ? mobile?.number || unavailable : unavailable}
+                                            value={<SensitiveValue value={connected ? mobile?.number : undefined} label={`${device.name || '设备'} 手机号`} fallback={unavailable}/>}
                                             mono
                                         />
                                     </dl>
@@ -238,7 +263,7 @@ export default function SerialControl() {
                     <CardContent className="py-5">
                         <dl className="mb-4 rounded-xl border border-slate-200 bg-slate-50 px-3.5">
                             <InfoRow
-                                label="串口连接"
+                                label="管理连接"
                                 value={<span className={connected ? 'text-emerald-600' : 'text-rose-600'}>{connected ? '已连接' : '未连接'}</span>}
                             />
                             <InfoRow
@@ -246,10 +271,15 @@ export default function SerialControl() {
                                 value={connected ? deviceStatus?.flymode ? '已开启' : '已关闭' : unavailable}
                             />
                         </dl>
+                        {isMqtt && <div className="mb-4 rounded-xl border border-blue-100 bg-blue-50/50 p-3.5">
+                            <label htmlFor="flymode-duration" className="text-xs font-semibold text-blue-950">飞行模式自动恢复时间（秒）</label>
+                            <Input id="flymode-duration" type="number" min={1} max={86400} step={1} value={flightSeconds} onChange={(event) => setFlightSeconds(event.target.value)} className="mt-2"/>
+                            <p className="mt-2 text-xs leading-5 text-blue-700">开启后会暂时断开 MQTT，并在指定时间后恢复。期间无法实时接收短信；可设置 1–86400 秒。</p>
+                        </div>}
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                             <Button
                                 onClick={() => setFlymodeMutation.mutate(!deviceStatus?.flymode)}
-                                disabled={!connected || setFlymodeMutation.isPending || isFetching}
+                                disabled={!connected || setFlymodeMutation.isPending || isFetching || (isMqtt && !deviceStatus?.flymode && !validDuration)}
                                 className="h-10 bg-blue-600 text-white hover:bg-blue-700"
                             >
                                 {setFlymodeMutation.isPending ? <Loader2 className="size-4 animate-spin"/> : <Signal className="size-4"/>}
@@ -265,12 +295,18 @@ export default function SerialControl() {
                                 重启模块
                             </Button>
                         </div>
+                        <Button variant="outline" className="mt-2 w-full" disabled={!connected || resetMutation.isPending} onClick={() => resetMutation.mutate()}>重置协议栈</Button>
+                        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/50 p-3.5">
+                            <p className="mb-2 text-xs font-semibold text-blue-950">设备定位灯</p>
+                            <LocateButton deviceId={deviceId} name={device.name || deviceId} online={connected} supported={device.features?.locate_led === true} locating={deviceStatus?.locating} className="w-full"/>
+                            <p className="mt-2 text-xs leading-5 text-blue-700">开启后 GPIO21 LED 持续闪烁，点击停止后熄灭。断网期间继续闪烁，模组重启后关闭。</p>
+                        </div>
                         {!connected && <p className="mt-3 text-xs leading-5 text-slate-400">设备连接后才能执行控制操作。</p>}
 
                         <div className="mt-5 border-t border-slate-100 pt-4">
                             <p className="mb-3 text-xs leading-5 text-slate-500">发送和回复短信已统一移动到短信中心。</p>
                             <Button variant="outline" className="h-10 w-full border-blue-200 text-blue-700 hover:bg-blue-50" asChild>
-                                <Link to="/messages?compose=1">
+                                <Link to={`/devices/${encodeURIComponent(deviceId)}/messages?compose=1`}>
                                     <MessageSquareText className="size-4"/>
                                     前往短信中心
                                 </Link>
@@ -279,6 +315,7 @@ export default function SerialControl() {
                     </CardContent>
                 </Card>
             </div>
+            <CommandHistory/>
         </div>
     );
 }

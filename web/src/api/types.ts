@@ -1,11 +1,12 @@
 // 短信记录
 export interface TextMessage {
+	deviceId: string;
     id: string;
     from: string;
     to: string;
     content: string;
     type: 'incoming' | 'outgoing';
-    status: 'received' | 'sending' | 'sent' | 'failed';
+    status: 'received' | 'sending' | 'sent' | 'failed' | 'unknown';
     timestamp: number;
     createdAt: number;
     updatedAt: number;
@@ -50,15 +51,21 @@ export interface MobileInfo {
     csq: number;
     rsrp: number;
     rsrq: number;
-    number: number;
-    uptime: number;              // 开机时长 (毫秒)
+    number: string;
+    uptime: number;              // 开机时长 (秒)
+    sms_ready?: boolean;
+    flymode?: boolean;
 }
 
 // 设备状态响应（来自 Lua 脚本的 status_response）
 export interface DeviceStatus {
+	deviceId?: string;
+	accessMode?: 'serial' | 'mqtt';
+	memory_usage?: number;
     type: string;                // 消息类型: "status_response"
     timestamp: number;           // 时间戳
     mem_kb: number;              // 内存使用 (KB)
+    locating?: boolean;          // GPIO21定位灯是否闪烁
     flymode: boolean;            // 飞行模式是否启用
     mobile: MobileInfo;          // 移动网络信息
     port_name: string;           // 串口名称

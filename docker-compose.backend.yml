@@ -1,0 +1,45 @@
+services:
+  uart_sms_forwarder:
+    build:
+      context: .
+      dockerfile: Dockerfile.source
+    container_name: uart_sms_forwarder
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    # Map each actual host port. Backend scans only ports visible inside container.
+    # devices:
+    #   - /dev/serial/by-id/REPLACE_DEVICE_A:/dev/ttyUSB0
+    #   - /dev/serial/by-id/REPLACE_DEVICE_B:/dev/ttyUSB1
+    environment:
+      TZ: Asia/Hong_Kong
+    depends_on:
+      - sms_mqtt
+
+  sms_mqtt:
+    image: emqx/emqx:5.8.8
+    container_name: sms_mqtt
+    hostname: sms_mqtt
+    restart: unless-stopped
+    environment:
+      EMQX_NODE__NAME: emqx@sms_mqtt
+      EMQX_NODE__DATA_DIR: /opt/emqx/data
+      EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:?Set EMQX_NODE_COOKIE in .env}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?Set EMQX_DASHBOARD_PASSWORD in .env}
+    ports:
+      - "1883:1883"
+      - "127.0.0.1:18083:18083"
+    volumes:
+      - sms_mqtt_data:/opt/emqx/data
+      - sms_mqtt_log:/opt/emqx/log
+      - ./deploy/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./deploy/emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      - ./deploy/emqx/users.csv:/opt/emqx/etc/users.csv:ro
+
+volumes:
+  sms_mqtt_data:
+  sms_mqtt_log:

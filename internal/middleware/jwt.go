@@ -30,7 +30,7 @@ func JWTMiddleware(secret string, logger *zap.Logger) echo.MiddlewareFunc {
 			// 提取 Bearer token
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || parts[0] != "Bearer" {
-				logger.Warn("Authorization header 格式错误", zap.String("header", authHeader))
+				logger.Warn("Authorization header 格式错误")
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "认证信息格式错误",
 				})

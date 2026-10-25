@@ -10,6 +10,7 @@ const (
 
 // ScheduledTask 定时任务
 type ScheduledTask struct {
+	DeviceID     string `gorm:"index;not null" json:"deviceId"`
 	ID           string `gorm:"primaryKey" json:"id"`                  // UUID
 	Name         string `json:"name"`                                  // 任务名称
 	Enabled      bool   `json:"enabled"`                               // 是否启用

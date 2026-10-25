@@ -1,0 +1,104 @@
+# Air780 双模式脚本（协议版本 1）
+
+脚本版本 2.1.1：心跳携带最新 `mobile` 信息（含开机时长 `uptime`，单位秒），默认每 60 秒更新一次。设备时间是本次状态上报时的时间，正常情况下持续变化。旧版脚本只在启动或查询状态时携带开机时长，可能一直显示启动时的 5 秒；更新 `main.lua` 并重启模组后生效，无需修改设备配置。
+
+Go/Web 已对接多设备 MQTT 接入，详见 BACKEND.md 和 WEB.md。EMQX 负责消息路由，业务解密由后端完成。硬件、蜂窝、SIM 和 EMQX 调试由用户执行。
+
+## 烧录与配置
+
+Luatools 同时烧录根目录 `main.lua`、`device_config.lua`、`device_crypto.lua`、`device_mqtt.lua`、`device_commands.lua`，并选择对应型号固件。默认 `access_mode = "serial"`。切换配置后重启。需要固件内置 sys、sysplus；MQTT 模式另需 mqtt、socket、rsa、crypto、fskv，GCM 标签校验需 V2021+，但仍以目标固件实测为准。
+
+- serial：USB 虚拟串口，115200/8N1，保持原 CMD_START/SMS_START 帧格式；没有启动 MQTT。不代表底层数据网络被禁止。
+- mqtt：使用 `socket.LWIP_GP` 蜂窝网卡，等待 IP_READY 后连接，用户名和密码均必填。
+- `device_id` 留空时使用 IMEI，支持 1–64 个字母、数字、下划线或横线；后端应将注册凭据绑定到这个 ID。
+- `debug_sms_content=true` 保留用户要求的短信明文调试打印；可以关闭。手机号在启动、SIM 状态变化及 SMS_READY 时尝试读取；SIM 未保存号码时可能为空。
+- MQTT 配置填写 host、port、username、password、registration_token（后端为每设备生成的至少 32 字符高熵秘密）、key_id。不要将真实密码或注册凭据提交到 Git。
+- 服务器生成 RSA 至少 2048 位密钥对；私钥只在后端。将 **PEM 公钥**烧录为 `/luadb/server_public.pem`，或填写内联 `public_key`。rsa.encrypt 不直接接收 X.509 证书；如果给的是证书，先在服务器导出公钥：`openssl x509 -in server.crt -pubkey -noout > server_public.pem`。
+- `tls=false` 使用普通 MQTT；用户名密码会明文经过网络。业务内容仍加密。`tls=true` 时填写实际 TLS 端口，并烧录 MQTT 服务器 CA 为 `/luadb/mqtt_ca.crt`；脚本先用 SNTP 校时，强制校验证书。TLS CA 和业务 RSA 公钥是两份不同用途的文件。
+- `sms_mqtt` 是计划中的 Docker 服务/容器名。蜂窝设备通常无法解析此名称，host 要填写设备可访问的域名或 IP。还需 EMQX 对外端口及防火墙放行。
+
+## Broker 认证与主题
+
+每台设备 client_id=`sms_{device_id}`，使用自己的用户名/密码。EMQX ACL：该设备只允许订阅自己的 `down`，只允许发布自己的其他主题。后端账号按授权订阅设备主题。
+
+默认根为 `sms/v1/devices/{device_id}`：
+
+| 后缀 | 方向 | 内容 |
+|---|---|---|
+| register | 设备 → 后端 | 公钥保护的会话根密钥，加密注册凭据和特征 |
+| down | 后端 → 设备 | 加密 register_result、command、ack |
+| events | 设备 → 后端 | 加密短信、SIM、来电事件 |
+| results | 设备 → 后端 | 加密命令结果、短信发送结果、错误 |
+| status | 设备 → 后端 | 加密启动、心跳、状态查询结果 |
+
+发布 QoS=1、retain=false。当前未设置未经认证的明文遗嘱；后端应依据已认证心跳及超时判定在线状态，不能把 Broker 连接成功当成业务认证成功。后端必须在 register_result 中返回 accepted=true 才允许设备执行 MQTT 命令。
+
+## 加密格式：sms-air780-v1
+
+所有二进制字段使用 **小写十六进制**，不是 Base64。
+
+1. 每次连接生成真随机 root（32 bytes）和 sid（16 bytes，编码成 32 个 hex 字符）。root 用服务器 PEM 公钥执行 RSA-PKCS1-v1_5 加密，成为 wrapped_key。服务器要使用匹配的 RSA 填充方式；不要按 OAEP 解密。后端应统一处理错误、不返回解密细节，避免形成填充预言。
+2. 分别派生上下行 AES-256 密钥：`HMAC-SHA256(key=root, data="sms-air780-v1|" + sid + "|up")` 和 `...|down`，使用摘要的原始 32 字节。LuatOS hmac_sha256 接口参数顺序是 data、key，返回 hex，需解码。
+3. 每方向 seq 从 1 开始递增，上限 2147483647。IV 为 16 字节：上行 `0000000000000001` + seq 的 16 位 hex；下行前缀 `0000000000000002`。新连接必须重新生成 root，禁止复用旧密钥和计数器。
+4. 明文为 UTF-8 JSON：`{v:1,device_id,sid,direction,seq,kind,body}`，AES-256-GCM，无填充、16 字节 tag。实测 V2054_Air780EPM_106 以及官方 mbedTLS 包装实现内部固定使用 AAD `1234567890123456`；后端在注册时通过完整标签认证识别空 AAD 或该固定 AAD，并将模式保存到会话，之后上下行均使用已确定的模式。不得跳过标签校验。元数据在明文内认证绑定，不能只信外层字段。
+5. 外层 JSON：`{v:1,device_id,sid,direction,seq,kind,iv,ciphertext,tag}`。其中 iv/ciphertext/tag 均为 hex。首条 kind=register 额外带 key_id 和 wrapped_key。
+6. 解密端必须检查 tag、内外元数据一致、方向正确、会话和设备匹配，seq 严格大于已接收值。无效消息拒绝执行。设备端每次解密后使用同一密钥/IV重新加密，仅在本地核对密文及重算的16字节tag，通过后才解析明文；重算数据不会发布。这兼容实测忽略输入tag的 V2054_Air780EPM_106，不依赖固件原生tag拒绝行为。新会话自检正确报文及篡改tag/密文，校验失败拒绝建立会话。协议及后端无需更改。
+
+### 注册明文 body
+
+```json
+{"registration_token":"每设备独立秘密","key_id":"server-key-1","features":{"device_id":"设备ID","imei":"IMEI","name":"Air780","model":"型号","firmware":"固件版本","version":"脚本版本","access_mode":"mqtt","mobile":{}}}
+```
+
+后端用 key_id 选择私钥，解开 root、派生密钥、解密 body，再校验凭据与 device_id 的绑定。每个设备只保留最新已认证 sid，旧会话拒绝业务消息。注册请求公开可发布并不代表设备可信。注册失败可直接丢弃并记录，不应泄漏具体凭据或私钥错误。
+
+成功响应通过 down 发送 kind=register_result，其加密 body：
+
+```json
+{"accepted":true,"server_time":1792900000}
+```
+
+server_time 为当前 UTC Unix 秒，用于建立本机会话的可信时间基准（结合单调运行时间），用于后续命令到期校验。设备最多等待配置的 registration_timeout_ms，超时后释放 MQTT 对象并重连。
+
+### 事件与后端确认
+
+kind=event 的 body 为 `{message_id:"唯一ID",data:{type:"incoming_sms",device_id:"...",from:"...",content:"...",timestamp:...}}`。data.type 保留旧串口事件类型，额外带 device_id/access_mode。
+
+后端完成保存/处理后，通过 down 返回 kind=ack、body=`{message_id:"原ID"}`。设备一次发送一个待确认事件，超时重传相同 message_id，但使用新 seq/IV；后端按 message_id 去重，对重复业务消息仍返回新的加密 ACK。**Broker PUBACK 或 sent 事件不能代替后端业务确认。**
+
+当前事件 outbox 和短信接收缓存为有界 RAM 队列，支持断网后的同次运行重传，不保证掉电保存。默认 outbox 100 条、短信缓存 50 条；满时打印日志。后端长期不可用时不能承诺无限缓存，持久化 outbox 留待后续可靠性阶段。设备重连后可用新会话重发旧事件；后端需跨会话按 message_id 去重。
+
+## 控制命令
+
+通过 down 发送 kind=command，加密 body 示例：
+
+```json
+{"device_id":"设备ID","request_id":"唯一请求ID","action":"send_sms","to":"10086","content":"查询","expires_at":1792900060}
+```
+
+- 所有 MQTT 命令必须带匹配的 device_id、1–64 字符 request_id（字母/数字/_/-）和 UTC Unix 秒 expires_at。有效期必须大于当前服务器基准时间且不超过 max_command_ttl（默认 300 秒）。
+- 支持 send_sms、get_status、set_flymode、set_locate、reset_stack、reboot_mcu。serial 模式保持旧命令不要求新增字段，也支持可选 device_id 防止误路由。
+- set_flymode 的 enabled 支持布尔、0/1 或对应字符串。MQTT 进入飞行模式强制提供 duration_seconds（1–86400），先设本地退出定时器再关蜂窝；期间不能收短信或远程命令。
+- send_sms 的号码只允许可选 + 和数字，最长24字符；content 非空且最多4096 UTF-8字节。队列最多10条，收到 SMS_READY 后才能发送，最多等待60秒；真正发送前再次检查有效期和会话。
+- 返回 cmd_response/result=queued 表示已进入短信队列；sms_send_result 才表示短信发送 API 的最终结果，不等于收件人送达回执。
+- 飞行模式、重置和重启先返回 accepted，再由任务执行。accepted 不能当作操作成功。断网操作前留1秒发消息是尽力而为，不保证后端收到；重启后的完成情况应结合新会话上报判断。
+- MQTT 请求在 fskv 中最多保存64个未过期编号。先持久化请求再执行；重复请求重发缓存结果，不再次执行。容量满时拒绝新请求；只回收已经过期的槽位。执行中掉电会返回 unknown，不自动重发短信，防止重复收费。**发送动作和落盘不能形成硬件事务，无法保证绝对 exactly-once**，后端需展示不确定状态。
+- 不把脚本中的 mobile.setAuto(0) 当作禁用数据；本版删除了原误导调用及写死的 data_disabled=true。
+
+## 用户联调清单
+
+离线测试：安装 Python 依赖 `lupa`、`cryptography` 后运行 `python tests/test_air780.py`。测试使用 Lua 5.3 和模拟 LuatOS 接口，不访问串口、蜂窝网络或真实 Broker；不能代替目标固件验证。
+
+1. 默认 serial：确认旧 Go 服务能握手；测试手机号读取、短信号码/内容日志、长短信收发、来电、查询状态及原控制。
+2. 烧录全部 Lua 文件，切 mqtt：先填公网 Broker 信息、设备注册凭据和服务器公钥，确认日志先连接再等待业务认证。
+3. 完成后端协议适配后：注册通过显示已认证；错误用户名密码应被 EMQX 拒绝，错误注册凭据应被后端拒绝。
+4. 测普通 MQTT 和 TLS 两条路径；TLS 缺 CA、校时失败或错误证书不应降级连接。
+5. 双向加解密、短信事件入库后 ACK、断网恢复重传、不同设备隔离；篡改 tag、旧 seq、错 device_id、过期命令均不执行。
+6. 相同 request_id 重复下发及重启后重复下发：有效期内不得再次发送短信。测试队列满和无 SMS_READY。
+7. MQTT 进入飞行模式不传恢复时间应拒绝；传时间后按时恢复连接。重启/重置结果以设备重新在线情况确认。
+
+参考：https://docs.openluat.com/osapi/core/mqtt/ 、https://docs.openluat.com/osapi/core/crypto/ 、https://docs.openluat.com/osapi/core/rsa/ 、https://docs.openluat.com/osapi/core/fskv/
+
+## GPIO21 定位灯
+
+Web 的定位开关下发 set_locate，enabled 为布尔值。GPIO21 专用于板载 LED，高电平点亮，开启后每500毫秒切换亮灭；停止后输出低电平。启动默认关闭，断网或离开页面时继续闪烁。定位不持久化，模组重启后关闭。重复开启不会叠加闪烁定时器，重复停止不会重新点亮。命令结果、状态查询和心跳报告 locating；features.locate_led 表示当前固件可用。USB 和加密 MQTT 均支持，GPIO 初始化失败不影响其他功能。更新 main.lua 后重启，LED 亮灭需在实际板上验证。

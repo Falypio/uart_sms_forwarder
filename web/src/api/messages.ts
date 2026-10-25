@@ -1,32 +1,10 @@
 import apiClient from './client';
-import type {ListResult, Stats, Conversation, TextMessage} from './types';
+import {devicePath} from './devices';
+import type {Stats, Conversation, TextMessage} from './types';
 
-// 获取统计信息
-export const getStats = (): Promise<Stats> => {
-    return apiClient.get('/messages/stats');
-};
-
-// 获取会话列表（按对方号码分组）
-export const getConversations = (): Promise<Conversation[]> => {
-    return apiClient.get('/messages/conversations');
-};
-
-// 获取指定会话的所有消息
-export const getConversationMessages = (peer: string): Promise<TextMessage[]> => {
-    return apiClient.get(`/messages/conversations/${encodeURIComponent(peer)}/messages`);
-};
-
-// 删除单条短信
-export const deleteMessage = (id: string) => {
-    return apiClient.delete(`/messages/${id}`);
-};
-
-// 删除整个会话（与某个联系人的所有消息）
-export const deleteConversation = (peer: string) => {
-    return apiClient.delete(`/messages/conversations/${encodeURIComponent(peer)}`);
-};
-
-// 清空所有短信
-export const clearMessages = () => {
-    return apiClient.delete('/messages');
-};
+export const getStats = (id: string, signal?: AbortSignal) => apiClient.get<Stats>(devicePath(id, '/messages/stats'), {signal});
+export const getConversations = (id: string, signal?: AbortSignal) => apiClient.get<Conversation[]>(devicePath(id, '/messages/conversations'), {signal});
+export const getConversationMessages = (id: string, peer: string, signal?: AbortSignal) => apiClient.get<TextMessage[]>(devicePath(id, `/messages/conversations/${encodeURIComponent(peer)}/messages`), {signal});
+export const deleteMessage = (id: string, messageId: string) => apiClient.delete<void>(devicePath(id, `/messages/${encodeURIComponent(messageId)}`));
+export const deleteConversation = (id: string, peer: string) => apiClient.delete<void>(devicePath(id, `/messages/conversations/${encodeURIComponent(peer)}`));
+export const clearMessages = (id: string) => apiClient.delete<void>(devicePath(id, '/messages'));

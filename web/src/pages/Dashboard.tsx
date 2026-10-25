@@ -1,4 +1,8 @@
-import {useEffect, useState} from 'react';
+import {describeOperator} from '@/utils/operator';
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
+import SensitiveValue from '@/components/SensitiveValue';
 import {Link} from 'react-router-dom';
 import {Cable, Clock3, MessageSquareText, Radio, RefreshCw, Send, Signal, Smartphone} from 'lucide-react';
 import {useQuery} from '@tanstack/react-query';
@@ -19,33 +23,18 @@ const describeSignal = (rsrp?: number) => {
 };
 
 export default function Dashboard() {
-    const [stats, setStats] = useState<Stats | null>(null);
-    const [statsLoading, setStatsLoading] = useState(true);
-
-    useEffect(() => {
-        const loadStats = async () => {
-            try {
-                setStats(await getStats());
-            } catch (error) {
-                console.error('获取统计信息失败:', error);
-            } finally {
-                setStatsLoading(false);
-            }
-        };
-
-        loadStats();
-        const interval = window.setInterval(loadStats, 30000);
-        return () => window.clearInterval(interval);
-    }, []);
-
-    const {data: deviceStatus, dataUpdatedAt, isFetching} = useQuery<DeviceStatus>({
-        queryKey: ['deviceStatus'],
-        queryFn: async () => getStatus() as Promise<DeviceStatus>,
+    const {deviceId, device} = useDevice();
+    const statsQuery = useQuery<Stats>({queryKey: deviceKey(deviceId, 'stats'), queryFn: ({signal}) => getStats(deviceId, signal), refetchInterval: 30000});
+    const stats = statsQuery.data;
+    const statsLoading = statsQuery.isPending;
+    const {data: deviceStatus, dataUpdatedAt, isFetching, isError: statusError} = useQuery<DeviceStatus>({
+        queryKey: deviceKey(deviceId, 'status'),
+        queryFn: ({signal}) => getStatus(deviceId, signal),
         refetchInterval: 10000,
     });
 
     const mobile = deviceStatus?.mobile;
-    const connected = Boolean(deviceStatus?.connected);
+    const connected = Boolean(!statusError && deviceStatus?.connected);
     const signalPercentage = connected && mobile?.rsrp
         ? Math.max(0, Math.min(100, Math.round(((mobile.rsrp + 140) / 96) * 100)))
         : 0;
@@ -53,13 +42,15 @@ export default function Dashboard() {
     const unavailable = '—';
 
     const deviceDetails = [
-        {label: '串口设备', value: connected ? deviceStatus?.port_name || unavailable : unavailable},
-        {label: '固件版本', value: connected ? deviceStatus?.version || unavailable : unavailable},
+        {label: '接入方式', value: device.accessMode === 'mqtt' ? '蜂窝 MQTT' : deviceStatus?.port_name || 'USB 串口'},
+        {label: '固件版本', value: device.features?.firmware || unavailable},
         {label: 'SIM 卡', value: connected ? mobile?.sim_ready ? '已就绪' : '未就绪' : unavailable},
         {label: '网络注册', value: connected ? mobile?.is_registered ? '已注册' : '未注册' : unavailable},
         {label: '飞行模式', value: connected ? deviceStatus?.flymode ? '已开启' : '已关闭' : unavailable},
         {label: '运行内存', value: connected && deviceStatus?.mem_kb ? `${deviceStatus.mem_kb.toFixed(1)} KB` : unavailable},
     ];
+
+    if (statsQuery.isError) return <QueryError error={statsQuery.error} retry={() => void statsQuery.refetch()}/>;
 
     if (statsLoading) {
         return (
@@ -81,7 +72,7 @@ export default function Dashboard() {
                     <span className="mr-1 hidden text-xs text-slate-400 md:inline">
                         {isFetching ? '正在同步' : `更新于 ${dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}) : '—'}`}
                     </span>
-                    <Link to="/messages?compose=1" className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700">
+                    <Link to={`/devices/${encodeURIComponent(deviceId)}/messages?compose=1`} className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700">
                         <Send className="size-4"/>发送短信
                     </Link>
                 </div>}
@@ -93,7 +84,7 @@ export default function Dashboard() {
                     value={connected ? '在线' : '离线'}
                     icon={Cable}
                     colorClass={connected ? 'bg-blue-50 text-blue-700' : 'bg-rose-50 text-rose-600'}
-                    subValue={connected ? deviceStatus?.port_name || '串口已连接' : '等待串口连接'}
+                    subValue={connected ? device.accessMode === 'mqtt' ? '蜂窝 MQTT 已连接' : deviceStatus?.port_name || 'USB 已连接' : '等待设备连接'}
                 />
                 <StatCard
                     label="信号质量"
@@ -128,7 +119,7 @@ export default function Dashboard() {
                             </span>
                             <div>
                                 <h2 className="text-sm font-bold text-slate-900">移动网络与设备</h2>
-                                <p className="text-xs text-slate-400">{connected ? mobile?.operator || '等待运营商信息' : '设备当前未连接'}</p>
+                                <p className="text-xs text-slate-400">{connected ? describeOperator(mobile) : '设备当前未连接'}</p>
                             </div>
                         </div>
                         <span className={cn(
@@ -184,7 +175,7 @@ export default function Dashboard() {
                                     <Smartphone className="size-4 text-blue-600"/>
                                     <div className="min-w-0">
                                         <p className="text-[10px] text-slate-400">本机号码</p>
-                                        <p className="truncate font-mono text-xs font-bold text-slate-800">{mobile.number}</p>
+                                        <p className="truncate font-mono text-xs font-bold text-slate-800"><SensitiveValue value={mobile.number} label={`${device.name || '设备'} 手机号`}/></p>
                                     </div>
                                 </div>
                             )}

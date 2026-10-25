@@ -1,333 +1,325 @@
--- =================================================================================
--- PROJECT: UART SMS Forwarder
--- DEVICE:  Air780EHV
--- VERSION: 1.0.4
--- 协议说明：
---   上行（MCU -> 模块）：CMD_START:{json}:CMD_END
---   下行（模块 -> MCU）：SMS_START:{json}:SMS_END
--- =================================================================================
-
 PROJECT = "uart_sms_forwarder"
-VERSION = "1.0.4"
+VERSION = "2.1.1"
+sys = require "sys"
+require "sysplus"
+local config = require "device_config"
+assert(config.access_mode == "serial" or config.access_mode == "mqtt", "invalid access_mode")
+local mqtt_mode = config.access_mode == "mqtt"
+local transport, journal
+local device_id = config.device_id
+if not device_id or device_id == "" then device_id = mobile.imei() end
+assert(type(device_id) == "string" and #device_id > 0 and #device_id <= 64
+    and device_id:match("^[%w_-]+$"), "configure a valid device_id or check IMEI")
+local uartid = config.uart_id
+local send_queue, msg_buffer, uart_buffer = {}, {}, ""
+local max_send_queue, max_msg_buffer = 10, 50
+local call_ring_count, sms_ready = 0, false
+local deferred = {}
+local flymode_restore_timer
+local locating, locate_timer, locate_output = false, nil, nil
+-- GPIO21 is dedicated to the board's active-high locator LED; start switched off.
+if gpio and gpio.setup then
+    local ok, output = pcall(gpio.setup, 21, 0)
+    if ok and type(output) == "function" then locate_output = output
+    else log.warn("LOCATE", "GPIO21 unavailable") end
+end
 
-log.info("main", PROJECT, VERSION)
+local function set_locating(enabled)
+    assert(locate_output, "GPIO21 locator unavailable")
+    if locating == enabled then return end
+    if locate_timer then sys.timerStop(locate_timer); locate_timer = nil end
+    locating = false
+    locate_output(0)
+    if enabled then
+        local level = 1
+        locate_output(level)
+        locate_timer = assert(sys.timerLoopStart(function()
+            level = 1 - level
+            locate_output(level)
+        end, 500), "locator timer unavailable")
+        locating = true
+    end
+    log.info("LOCATE", "GPIO21", locating and "blinking" or "off")
+end
 
--- 1. 引入必要库
-sys = require("sys")
-
--- 2. 全局配置与变量
--- [注意] 如果接单片机物理引脚，通常是 uart.UART_1；如果是USB调试，用 uart.VUART_0
-local uartid = uart.VUART_0
-local max_buffer_size = 50
-local max_send_queue_size = 10
-local msg_buffer = {}
-local send_queue = {}
-local uart_recv_buffer = ""
-local call_ring_count = 0  -- 来电响铃计数
-
--- ========== 关键：禁用自动数据连接 ==========
-mobile.setAuto(0)
-
--- 3. 看门狗
+log.info("main", PROJECT, VERSION, device_id, config.access_mode)
+-- No mobile.setAuto(0): it is NOT a mobile-data disable switch.
 if wdt then
     wdt.init(9000)
     sys.timerLoopStart(wdt.feed, 3000)
 end
+if not mqtt_mode then uart.setup(uartid, 115200, 8, 1) end
 
-uart.setup(uartid, 115200, 8, 1)
-log.info("System", "UART 初始化成功")
+local function read_phone_number()
+    local number = mobile.number(0)
+    if number and number ~= "" and number ~= "unknown" then
+        log.info("phone_number", "本机手机号:", number)
+        return number
+    end
+    log.warn("phone_number", "未读取到手机号，SIM卡可能未保存本机号码")
+    return ""
+end
 
--- =================================================================================
--- 工具函数区
--- =================================================================================
+local function uptime()
+    local high, low = mcu.ticks2(2)
+    return high * 1000000 + low
+end
 
 function get_mobile_info()
-    local info = {}
-    -- 使用 status 判断：0=未注册 1=已注册 2=搜索中 3=拒绝 5=漫游注册
-    local net_stat = mobile.status()
-    local iccid = mobile.iccid()
-    info.sim_ready = (iccid ~= nil and iccid ~= "" and iccid ~= "unknown")
-    info.iccid = iccid or "unknown"
-    info.imsi = mobile.imsi() or "unknown"
-    info.number = mobile.number(0) or ""  -- 获取手机号，可能为空
-
-    -- 获取信号强度指标
-    local csq = mobile.csq() or 0 -- 范围 0-31，越大越好
-    info.csq = csq
-    info.rssi = mobile.rssi() or -113  -- 范围 0到-114，值越大越好
-    info.rsrp = mobile.rsrp() or -140  -- 范围 -44到-140，值越大越好 (4G模块)
-    info.rsrq = mobile.rsrq() or -20   -- 范围 -3到-19.5，值越大越好 (4G模块)
-
-    -- 根据 CSQ 判断信号等级（仅供参考，4G模块应参考rsrp/rsrq）
-    if csq == 0 or csq == 99 then
-        info.signal_level = 0
-        info.signal_desc = "无信号"
-    else
-        info.signal_level = csq
-        info.signal_desc = csq >= 20 and "强" or (csq >= 10 and "中" or "弱")
-    end
-
-    info.is_registered = (net_stat == 1 or net_stat == 5)
-    info.is_roaming = net_stat == 5
-    info.uptime = mcu.ticks2() -- 单位为秒
-
-    -- https://docs.openluat.com/osapi/core/mobile/#mobileflymodeindex-enable
-    -- 查询飞行模式状态
-    -- mobile.flymode() 返回当前飞行模式状态：true 表示飞行模式启用，false 表示飞行模式禁用
-    -- 实测永远返回 false？即使飞行模式已启用
-    info.flymode = mobile.flymode()
-
-    return info
+    local stat, iccid = mobile.status(), mobile.iccid()
+    local csq = mobile.csq() or 0
+    local level = (csq == 0 or csq == 99) and 0 or csq
+    return {
+        sim_ready = iccid ~= nil and iccid ~= "" and iccid ~= "unknown",
+        sms_ready = sms_ready, iccid = iccid or "unknown", imsi = mobile.imsi() or "unknown",
+        number = mobile.number(0) or "", csq = csq, rssi = mobile.rssi() or -113,
+        rsrp = mobile.rsrp() or -140, rsrq = mobile.rsrq() or -20,
+        signal_level = level, signal_desc = level == 0 and "无信号" or (level >= 20 and "强" or (level >= 10 and "中" or "弱")),
+        is_registered = stat == 1 or stat == 5 or stat == 6 or stat == 7,
+        is_roaming = stat == 5 or stat == 7, net_status = stat,
+        uptime = uptime(), flymode = mobile.flymode(),
+    }
 end
 
-function send_to_uart(data)
-    local ok, json_str = pcall(json.encode, data)
-    if ok and json_str then
-        uart.write(uartid, "SMS_START:" .. json_str .. ":SMS_END\r\n")
-        return true
-    else
-        log.error("UART", "JSON Encode Failed", json_str)
-        return false
-    end
+local function features()
+    return {device_id = device_id, name = config.device_name, imei = mobile.imei(),
+        model = rtos.bsp(), firmware = rtos.version(), project = PROJECT, version = VERSION,
+        access_mode = config.access_mode, locate_led = locate_output ~= nil, locate_gpio = 21, mobile = get_mobile_info()}
 end
 
-function process_uart_command(cmd_data)
-    if not cmd_data.action then
-        send_to_uart({type = "error", msg = "missing action"})
+local function emit(data)
+    data.device_id, data.access_mode = device_id, config.access_mode
+    if data.timestamp == nil then data.timestamp = os.time() end
+    if mqtt_mode then return transport.send(data) end
+    local encoded = json.encode(data)
+    if not encoded then return false end
+    return uart.write(uartid, "SMS_START:" .. encoded .. ":SMS_END\r\n") ~= nil
+end
+
+local function bool(value)
+    if value == true or value == 1 or value == "true" or value == "1" then return true end
+    if value == false or value == 0 or value == "false" or value == "0" then return false end
+    return nil
+end
+
+local function process_command(cmd, remote)
+    if type(cmd) ~= "table" or type(cmd.action) ~= "string" then
+        emit({type = "error", msg = "missing action"})
         return
     end
-
-    if cmd_data.action == "send_sms" and cmd_data.to and cmd_data.content then
-        local request_id = cmd_data.request_id or os.time()
-        if #send_queue >= max_send_queue_size then
-            send_to_uart({
-                type = "sms_send_result",
-                success = false,
-                request_id = request_id,
-                to = cmd_data.to,
-                error = "send queue full",
-                timestamp = os.time()
-            })
-        else
-            table.insert(send_queue, {
-                request_id = request_id,
-                to = cmd_data.to,
-                content = cmd_data.content
-            })
-            sys.publish("SMS_SEND_QUEUE_CHANGED")
+    if cmd.device_id and cmd.device_id ~= device_id then return end
+    if remote and cmd.device_id ~= device_id then return end
+    local action, enabled = cmd.action, bool(cmd.enabled)
+    local function reject(message)
+        emit({type = "error", request_id = cmd.request_id, action = action, msg = message})
+    end
+    if action == "send_sms" then
+        if type(cmd.to) ~= "string" or not cmd.to:match("^%+?%d+$") or #cmd.to > 24
+            or type(cmd.content) ~= "string" or #cmd.content == 0 or #cmd.content > 4096 then
+            reject("invalid phone/content (max 4096 UTF-8 bytes)"); return
         end
-
-    elseif cmd_data.action == "get_status" then
-        send_to_uart({
-            type = "status_response",
-            timestamp = os.time(),
-            mem_kb = math.floor(collectgarbage("count")),
-            version = VERSION,
-            mobile = get_mobile_info()
-        })
-
-    elseif cmd_data.action == "set_flymode" and cmd_data.enabled ~= nil then
-        -- 规范化为布尔值：兼容 true/false、1/0、"true"/"false"
-        -- Lua 中 0 也是真值，必须显式转换
-        local flymode_enabled = (cmd_data.enabled == true or cmd_data.enabled == 1 or
-                                 cmd_data.enabled == "true" or cmd_data.enabled == "1")
-
-        -- 设置飞行模式（0 表示 sim0）
-        -- enabled = true 表示启用飞行模式（禁用蜂窝网络）
-        -- enabled = false 表示禁用飞行模式（启用蜂窝网络）
-        mobile.flymode(0, flymode_enabled)
-
-        if not flymode_enabled then
-            mobile.setAuto(0) -- 退出飞行模式后，确保不自动拨号
+        if #send_queue >= max_send_queue then reject("send queue full"); return end
+    elseif action == "set_locate" then
+        if enabled == nil then reject("invalid enabled value"); return end
+        if not locate_output then reject("GPIO21 locator unavailable"); return end
+    elseif action == "set_flymode" then
+        if enabled == nil then reject("invalid enabled value"); return end
+        if remote and enabled and (type(cmd.duration_seconds) ~= "number" or cmd.duration_seconds % 1 ~= 0
+            or cmd.duration_seconds < 1 or cmd.duration_seconds > 86400) then
+            reject("MQTT flymode requires duration_seconds (1..86400)"); return
         end
+    elseif action ~= "get_status" and action ~= "reset_stack" and action ~= "reboot_mcu" then
+        reject("unknown command"); return
+    end
+    if (action == "reset_stack" or action == "reboot_mcu" or action == "set_flymode") and #deferred >= 10 then
+        reject("control queue full"); return
+    end
 
-        send_to_uart({
-            type = "cmd_response",
-            action = "set_flymode",
-            result = "ok"
-        })
-
-    elseif cmd_data.action == "reset_stack" then
-        log.info("CMD", "重启协议栈")
-        mobile.reset()
-        mobile.setAuto(0)
-        send_to_uart({type = "cmd_response", action = "reset_stack", result = "ok"})
-
-    elseif cmd_data.action == "reboot_mcu" then
-        log.info("CMD", "重启模块")
-        send_to_uart({type = "cmd_response", action = "reboot_mcu", result = "ok"})
-        sys.timerStart(pm.reboot, 200)
+    local slot
+    if remote then
+        local error_msg, previous
+        slot, error_msg, previous = journal.begin(cmd)
+        if not slot then
+            if previous then emit(previous) else reject(error_msg) end
+            return
+        end
+    end
+    local request_id = cmd.request_id or tostring(os.time())
+    local function reply(data)
+        data.request_id = request_id
+        if remote then journal.finish(slot, data) end
+        emit(data)
+    end
+    if action == "send_sms" then
+        send_queue[#send_queue + 1] = {request_id = request_id, to = cmd.to, content = cmd.content,
+            slot = slot, expires_at = remote and cmd.expires_at or nil}
+        sys.publish("SMS_SEND_QUEUE_CHANGED")
+        emit({type = "cmd_response", action = action, request_id = request_id, result = "queued"})
+    elseif action == "set_locate" then
+        local ok, err = pcall(set_locating, enabled)
+        if not ok then
+            locating = false
+            if locate_timer then sys.timerStop(locate_timer); locate_timer = nil end
+            if locate_output then pcall(locate_output, 0) end
+        end
+        reply({type = "cmd_response", action = action, result = ok and "ok" or "error",
+            locating = locating, gpio = 21, msg = not ok and tostring(err) or nil})
+    elseif action == "get_status" then
+        -- Status can be large; store only a small completion marker in fskv.
+        if remote then journal.finish(slot, {type = "cmd_response", action = action, request_id = request_id, result = "ok"}) end
+        emit({type = "status_response", request_id = request_id, version = VERSION,
+            mem_kb = math.floor(collectgarbage("count")), locating = locating, mobile = get_mobile_info(), features = features()})
     else
-        send_to_uart({type = "error", msg = "unknown command"})
+        local job = {action = action, enabled = enabled, duration = cmd.duration_seconds,
+            remote = remote, slot = slot, request_id = request_id, expires_at = remote and cmd.expires_at or nil}
+        deferred[#deferred + 1] = job
+        -- Accepted != completed. Disruptive operations execute in a task, not a UART/MQTT callback.
+        emit({type = "cmd_response", action = action, request_id = request_id, result = "accepted"})
     end
 end
 
--- =================================================================================
--- 事件监听区
--- =================================================================================
+function process_uart_command(cmd) process_command(cmd, false) end
 
+if mqtt_mode then
+    transport = require "device_mqtt"
+    journal = require "device_commands"
+    journal.init(config.mqtt, transport.now)
+    transport.start(config.mqtt, device_id, features, function(cmd) process_command(cmd, true) end)
+else
+    uart.on(uartid, "receive", function(id, len)
+        uart_buffer = uart_buffer .. (uart.read(id, len) or "")
+        while true do
+            local first = uart_buffer:find("CMD_START:", 1, true)
+            if not first then break end
+            local last = uart_buffer:find(":CMD_END", first + 10, true)
+            if not last then break end
+            local raw = uart_buffer:sub(first + 10, last - 1)
+            uart_buffer = uart_buffer:sub(last + 8)
+            if #raw <= 8192 then
+                local ok, cmd = pcall(json.decode, raw)
+                if ok and type(cmd) == "table" then process_uart_command(cmd)
+                else emit({type = "error", msg = "Invalid JSON"}) end
+            else emit({type = "error", msg = "Command too large"}) end
+        end
+        if #uart_buffer > 8192 then
+            uart_buffer = ""
+            emit({type = "error", msg = "Buffer overflow, cleared"})
+        end
+    end)
+end
+
+sys.subscribe("SMS_READY", function()
+    sms_ready = true
+    read_phone_number()
+    sys.publish("SMS_SEND_QUEUE_CHANGED")
+end)
 sys.subscribe("SMS_INC", function(phone, content)
-    log.info("Event", "收到短信:", phone)
-    local msg = {
-        type = "incoming_sms",
-        timestamp = os.time(),
-        from = phone,
-        content = content
-    }
-    table.insert(msg_buffer, msg)
-    if #msg_buffer > max_buffer_size then
-        table.remove(msg_buffer, 1) -- 移除旧的
+    log.info("SMS", "发送号码:", phone)
+    if config.debug_sms_content then log.info("SMS", "短信内容:", content) end
+    if #msg_buffer >= max_msg_buffer then
+        log.error("SMS", "receive buffer full; dropping oldest SMS")
+        table.remove(msg_buffer, 1)
     end
+    msg_buffer[#msg_buffer + 1] = {type = "incoming_sms", timestamp = os.time(), from = phone, content = content}
     sys.publish("NEW_MSG_IN_BUFFER")
 end)
-
 sys.subscribe("SIM_IND", function(status)
-    send_to_uart({type = "sim_event", status = status})
+    if status == "NORDY" or status == "SIM_PIN" then sms_ready = false end
+    read_phone_number()
+    emit({type = "sim_event", status = status})
 end)
-
--- 来电事件处理
 sys.subscribe("CC_IND", function(state)
-    if state == "READY" then
-        log.info("Call", "通话准备完成")
-
-    elseif state == "INCOMINGCALL" then
-        -- 有电话呼入
+    if state == "INCOMINGCALL" then
         if call_ring_count == 0 then
-            log.info("Call", "检测到来电")
-            local phone_num = cc.lastNum()
-            log.info("Call", "来电号码:", phone_num or "unknown")
-
-            -- 转发来电通知到 UART
-            send_to_uart({
-                type = "incoming_call",
-                timestamp = os.time(),
-                from = phone_num or "unknown"
-            })
+            emit({type = "incoming_call", from = cc.lastNum() or "unknown"})
         end
-
         call_ring_count = call_ring_count + 1
-
-        -- 响4声后自动挂断（可根据需求调整）
---         if call_ring_count > 3 then
---             log.info("Call", "自动挂断来电")
---             cc.hangUp()
---         end
-
     elseif state == "DISCONNECTED" then
-        -- 电话被挂断
-        log.info("Call", "通话结束")
         call_ring_count = 0
-        send_to_uart({
-            type = "call_disconnected",
-            timestamp = os.time()
-        })
+        emit({type = "call_disconnected"})
     end
 end)
 
--- =================================================================================
--- 任务循环区
--- =================================================================================
-
-uart.on(uartid, "receive", function(id, len)
-    local chunk = uart.read(id, len)
-    if not chunk then return end
-
-    uart_recv_buffer = uart_recv_buffer .. chunk
-
-    -- 使用与下行一致的包围标志：CMD_START:{json}:CMD_END
-    while true do
-        local start_pos = uart_recv_buffer:find("CMD_START:", 1, true)
-        if not start_pos then break end
-
-        local end_pos = uart_recv_buffer:find(":CMD_END", start_pos + 10, true)
-        if not end_pos then break end  -- 数据未接收完整，等待下次
-
-        -- 提取 JSON 部分
-        local json_str = uart_recv_buffer:sub(start_pos + 10, end_pos - 1)
-        -- 移除已处理的数据
-        uart_recv_buffer = uart_recv_buffer:sub(end_pos + 8)
-
-        if #json_str > 0 then
-            local success, cmd = pcall(json.decode, json_str)
-            if success and cmd then
-                process_uart_command(cmd)
-            else
-                log.warn("UART", "JSON解析失败:", json_str:sub(1, 50))
-                send_to_uart({type="error", msg="Invalid JSON"})
-            end
-        end
-    end
-
-    -- 溢出保护：如果缓冲区过大且找不到有效包，清空
-    if #uart_recv_buffer > 4096 then
-        log.error("UART", "Buffer Overflow - 清空缓冲区")
-        uart_recv_buffer = ""
-        send_to_uart({type="error", msg="Buffer overflow, cleared"})
-    end
-end)
-
--- 串行发送短信，避免多个 sms.sendLong 同时操作 modem。
 sys.taskInit(function()
     while true do
-        if #send_queue == 0 then
-            sys.waitUntil("SMS_SEND_QUEUE_CHANGED")
-        end
+        if #send_queue == 0 then sys.waitUntil("SMS_SEND_QUEUE_CHANGED", 1000) end
         while #send_queue > 0 do
             local item = table.remove(send_queue, 1)
-            log.info("CMD", "发送短信 ->", item.to)
-            local result = sms.sendLong(item.to, item.content).wait()
-            send_to_uart({
-                type = "sms_send_result",
-                success = result == true,
-                request_id = item.request_id,
-                to = item.to,
-                timestamp = os.time()
-            })
+            local ready, waited = sms_ready, 0
+            while not ready and waited < 60000 do
+                sys.wait(1000)
+                waited, ready = waited + 1000, sms_ready
+            end
+            local valid = not item.expires_at or (transport.now() and transport.now() < item.expires_at)
+            local ok, result = false, false
+            if ready and valid then
+                ok, result = pcall(function() return sms.sendLong(item.to, item.content).wait() end)
+            end
+            local response = {type = "sms_send_result", request_id = item.request_id, to = item.to,
+                success = ok and result == true, timestamp = os.time()}
+            if not ready then response.error = "SMS not ready"
+            elseif not valid then response.error = "command expired or session disconnected" end
+            if item.slot then journal.finish(item.slot, response) end
+            emit(response)
         end
     end
 end)
 
 sys.taskInit(function()
     while true do
-        if #msg_buffer == 0 then
-            sys.waitUntil("NEW_MSG_IN_BUFFER")
+        if #msg_buffer == 0 then sys.waitUntil("NEW_MSG_IN_BUFFER", 1000) end
+        if msg_buffer[1] and emit(msg_buffer[1]) then table.remove(msg_buffer, 1) end
+        sys.wait(100)
+    end
+end)
+
+sys.taskInit(function()
+    while true do
+        local job = table.remove(deferred, 1)
+        if job then
+            if job.remote then sys.wait(1000) end -- best effort: send accepted response before disconnect
+            local ok = pcall(function()
+                assert(not job.expires_at or (transport.now() and transport.now() < job.expires_at), "command expired")
+                if job.action == "set_flymode" then
+                    if flymode_restore_timer then sys.timerStop(flymode_restore_timer) end
+                    if job.enabled and job.remote then
+                        -- Arm restoration BEFORE dropping cellular connectivity.
+                        flymode_restore_timer = sys.timerStart(function()
+                            mobile.flymode(0, false)
+                            flymode_restore_timer = nil
+                        end, job.duration * 1000)
+                    end
+                    mobile.flymode(0, job.enabled)
+                    if job.enabled then sms_ready = false end
+                elseif job.action == "reset_stack" then
+                    sms_ready = false
+                    mobile.reset()
+                elseif job.action == "reboot_mcu" then
+                    if job.slot then journal.finish(job.slot, {type = "cmd_response", action = job.action,
+                        request_id = job.request_id, result = "reboot_requested"}) end
+                    pm.reboot()
+                end
+            end)
+            local response = {type = "cmd_response", action = job.action, request_id = job.request_id,
+                result = ok and "ok" or "error"}
+            if job.slot then journal.finish(job.slot, response) end
+            emit(response)
         end
-        while #msg_buffer > 0 do
-            local msg = table.remove(msg_buffer, 1)
-            if msg then
-                send_to_uart(msg)
-                sys.wait(50)
-            end
-        end
-        if collectgarbage("count") > 1024 then
-            collectgarbage("collect")
-        end
+        sys.wait(100)
     end
 end)
 
 sys.taskInit(function()
     sys.wait(5000)
-    send_to_uart({
-        type = "system_ready",
-        project = PROJECT,
-        version = VERSION,
-        data_disabled = true
-    })
+    read_phone_number()
+    emit({type = "system_ready", project = PROJECT, version = VERSION, locating = locating, features = features()})
     while true do
-        sys.wait(60000)
+        sys.wait(config.heartbeat_ms)
         local info = get_mobile_info()
-        send_to_uart({
-            type = "heartbeat",
-            timestamp = os.time(),
-            rssi = info.rssi,
-            signal_level = info.signal_level,
-            signal_desc = info.signal_desc,
-            net_reg = info.is_registered,
-            flymode = info.flymode,
-            sim_ready = info.sim_ready,
-            memory_usage = math.floor(collectgarbage("count")),
-            buffer_size = #msg_buffer
-        })
+        emit({type = "heartbeat", mobile = info, locating = locating, rssi = info.rssi, signal_level = info.signal_level,
+            signal_desc = info.signal_desc, net_reg = info.is_registered, flymode = info.flymode,
+            sim_ready = info.sim_ready, sms_ready = info.sms_ready,
+            memory_usage = math.floor(collectgarbage("count")), buffer_size = #msg_buffer})
     end
 end)
 

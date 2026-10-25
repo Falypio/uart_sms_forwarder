@@ -1,3 +1,7 @@
+import {Link} from 'react-router-dom';
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
 import {useState} from 'react';
 import {Activity, Clock3, Loader2, Save, ShieldAlert} from 'lucide-react';
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query';
@@ -19,28 +23,33 @@ const MIN_IDLE_HOURS = 1;
 const MAX_IDLE_HOURS = 30 * 24;
 
 export default function AutoFlymodeSettings() {
+    const {deviceId, device, isActive} = useDevice();
     const queryClient = useQueryClient();
     const [draft, setDraft] = useState<{enabled: boolean; idleTimeoutHours: string} | null>(null);
 
     const configQuery = useQuery({
-        queryKey: ['autoFlymodeConfig'],
-        queryFn: getAutoFlymodeConfig,
+        queryKey: deviceKey(deviceId, 'autoFlymodeConfig'),
+        queryFn: ({signal}) => getAutoFlymodeConfig(deviceId, signal),
+        enabled: device.accessMode === 'serial',
     });
 
     const statusQuery = useQuery<DeviceStatus>({
-        queryKey: ['deviceStatus'],
-        queryFn: async () => getStatus() as Promise<DeviceStatus>,
+        queryKey: deviceKey(deviceId, 'status'),
+        queryFn: ({signal}) => getStatus(deviceId, signal),
         refetchInterval: 10000,
     });
 
     const saveMutation = useMutation({
-        mutationFn: (config: AutoFlymodeConfig) => saveAutoFlymodeConfig(config),
+        mutationFn: (config: AutoFlymodeConfig) => saveAutoFlymodeConfig(deviceId, config),
         onSuccess: async () => {
+            if (!isActive()) return;
             toast.success('自动飞行模式配置已保存');
-            await queryClient.invalidateQueries({queryKey: ['autoFlymodeConfig']});
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'autoFlymodeConfig')});
+            if (!isActive()) return;
             setDraft(null);
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('保存自动飞行模式配置失败:', error);
             toast.error('保存失败，请检查配置');
         },
@@ -69,6 +78,15 @@ export default function AutoFlymodeSettings() {
         });
     };
 
+    if (device.accessMode === 'mqtt') return <div>
+        <PageHeader title="自动飞行模式" description="当前设备通过蜂窝 MQTT 接入。"/>
+        <div className="mt-6 rounded-2xl border border-blue-100 bg-white p-6">
+            <h2 className="font-semibold text-slate-900">请使用定时恢复的飞行模式</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">无限期关闭蜂窝网络会断开 MQTT 管理通道。此模式下不启用自动空闲策略；可在设备控制中指定恢复时间。</p>
+            <Button className="mt-4" asChild><Link to={`/devices/${encodeURIComponent(deviceId)}/serial`}>前往设备控制</Link></Button>
+        </div>
+    </div>;
+    if (configQuery.isError) return <QueryError error={configQuery.error} retry={() => void configQuery.refetch()}/>;
     if (configQuery.isLoading) {
         return (
             <div className="flex items-center justify-center py-20">
@@ -94,8 +112,8 @@ export default function AutoFlymodeSettings() {
                             空闲策略
                         </CardTitle>
                         <CardDescription>
-                            配置收到或发送短信后，持续空闲多长时间自动进入飞行模式。自动或手动切换成功后，
-                            系统会通过所有已启用的通知渠道发送状态通知。
+                            配置收到或发送短信后，持续空闲多长时间自动进入飞行模式。
+
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-6">

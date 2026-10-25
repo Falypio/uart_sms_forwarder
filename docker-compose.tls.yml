@@ -1,0 +1,17 @@
+# Optional overlay: docker compose -f docker-compose.backend.yml -f docker-compose.tls.yml up -d --build
+services:
+  sms_mqtt:
+    environment:
+      EMQX_LISTENERS__SSL__DEFAULT__ENABLE: "true"
+      EMQX_LISTENERS__SSL__DEFAULT__BIND: "0.0.0.0:8883"
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE: /opt/emqx/etc/sms-certs/server.crt
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE: /opt/emqx/etc/sms-certs/server.key
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY: verify_none
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT: "false"
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./deploy/emqx/certs:/opt/emqx/etc/sms-certs:ro
+  uart_sms_forwarder:
+    volumes:
+      - ./deploy/emqx/certs/ca.crt:/app/mqtt-ca.crt:ro

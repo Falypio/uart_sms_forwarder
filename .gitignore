@@ -9,4 +9,14 @@ bin
 app.db
 config.yaml
 logs
+.env
+deploy/emqx/users.csv
+deploy/emqx/certs/
+web/node_modules/
+web/dist/
+web/test-results/
+__pycache__/
 .DS_Store
+
+# Per-device deployment copies contain credentials.
+air780-*/

@@ -1,3 +1,6 @@
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
 import {useEffect, useRef, useState} from 'react';
 import {Loader2, MoreVertical, Plus, RefreshCw, Search, Send, Trash2, User} from 'lucide-react';
 import {useSearchParams} from 'react-router-dom';
@@ -26,6 +29,7 @@ import type {Conversation, DeviceStatus, TextMessage} from '@/api/types';
 import {PageHeader} from '@/components/PageHeader';
 
 export default function Messages() {
+    const {deviceId, device, isActive} = useDevice();
     const queryClient = useQueryClient();
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [searchParams, setSearchParams] = useSearchParams();
@@ -58,24 +62,24 @@ export default function Messages() {
     };
 
     // 使用新的会话列表 API
-    const {data: conversations = [], isLoading, refetch} = useQuery<Conversation[]>({
-        queryKey: ['conversations'],
-        queryFn: getConversations,
+    const {data: conversations = [], isLoading, isError, error, refetch} = useQuery<Conversation[]>({
+        queryKey: deviceKey(deviceId, 'conversations'),
+        queryFn: ({signal}) => getConversations(deviceId, signal),
         refetchInterval: 5000, // 每 5 秒自动刷新
     });
 
-    const {data: deviceStatus} = useQuery<DeviceStatus>({
-        queryKey: ['deviceStatus'],
-        queryFn: async () => getStatus() as Promise<DeviceStatus>,
+    const {data: deviceStatus, isError: statusError} = useQuery<DeviceStatus>({
+        queryKey: deviceKey(deviceId, 'status'),
+        queryFn: ({signal}) => getStatus(deviceId, signal),
         refetchInterval: 10000,
     });
 
     // 获取指定会话的所有消息
-    const {data: currentMessages = []} = useQuery<TextMessage[]>({
-        queryKey: ['conversation-messages', selectedPeer],
-        queryFn: () => {
+    const {data: currentMessages = [], isError: messagesError, error: messagesQueryError, refetch: refetchMessages} = useQuery<TextMessage[]>({
+        queryKey: deviceKey(deviceId, 'conversation-messages', selectedPeer),
+        queryFn: ({signal}) => {
             if (!selectedPeer) return Promise.resolve([]);
-            return getConversationMessages(selectedPeer);
+            return getConversationMessages(deviceId, selectedPeer, signal);
         },
         enabled: !!selectedPeer,
         refetchInterval: 5000,
@@ -83,8 +87,9 @@ export default function Messages() {
 
     // 发送短信 Mutation
     const sendSMSMutation = useMutation({
-        mutationFn: (data: { to: string; content: string }) => sendSMS(data),
+        mutationFn: (data: { to: string; content: string }) => sendSMS(deviceId, data),
         onSuccess: (_, variables) => {
+            if (!isActive()) return;
             setInputText('');
             setNewRecipient('');
             setNewContent('');
@@ -93,27 +98,30 @@ export default function Messages() {
             const nextParams = new URLSearchParams(searchParams);
             nextParams.delete('compose');
             setSearchParams(nextParams, {replace: true});
-            toast.success('短信已提交发送');
+            toast.success("短信请求已提交，结果见发送状态", {description: device.name || deviceId});
             // 刷新会话列表和当前会话消息
-            queryClient.invalidateQueries({queryKey: ['conversations']});
-            queryClient.invalidateQueries({queryKey: ['conversation-messages']});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversations')});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversation-messages')});
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('发送失败:', error);
-            toast.error('发送失败');
+            toast.error(error instanceof Error ? error.message : '提交失败');
         },
     });
 
     // 清空所有短信
     const clearMutation = useMutation({
-        mutationFn: clearMessages,
+        mutationFn: () => clearMessages(deviceId),
         onSuccess: () => {
+            if (!isActive()) return;
             toast.success('清空成功');
             setSelectedPeer(null);
-            queryClient.invalidateQueries({queryKey: ['conversations']});
-            queryClient.invalidateQueries({queryKey: ['conversation-messages']});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversations')});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversation-messages')});
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('清空失败:', error);
             toast.error('清空失败');
         },
@@ -121,16 +129,18 @@ export default function Messages() {
 
     // 删除整个会话
     const deleteConversationMutation = useMutation({
-        mutationFn: (peer: string) => deleteConversation(peer),
+        mutationFn: (peer: string) => deleteConversation(deviceId, peer),
         onSuccess: (_, peer) => {
+            if (!isActive()) return;
             toast.success('会话已删除');
             // 如果删除的是当前选中的会话，清除选中状态
             if (selectedPeer === peer) {
                 setSelectedPeer(null);
             }
-            queryClient.invalidateQueries({queryKey: ['conversations']});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversations')});
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('删除失败:', error);
             toast.error('删除会话失败');
         },
@@ -138,13 +148,15 @@ export default function Messages() {
 
     // 删除单条消息
     const deleteMessageMutation = useMutation({
-        mutationFn: (messageId: string) => deleteMessage(messageId),
+        mutationFn: (messageId: string) => deleteMessage(deviceId, messageId),
         onSuccess: () => {
+            if (!isActive()) return;
             toast.success('消息已删除');
-            queryClient.invalidateQueries({queryKey: ['conversations']});
-            queryClient.invalidateQueries({queryKey: ['conversation-messages']});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversations')});
+            queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'conversation-messages')});
         },
         onError: (error) => {
+            if (!isActive()) return;
             console.error('删除失败:', error);
             toast.error('删除消息失败');
         },
@@ -194,7 +206,7 @@ export default function Messages() {
     };
 
     const handleClear = () => {
-        if (!confirm('确定要清空所有短信吗？此操作不可恢复！')) return;
+        if (!confirm('确定要清空设备 ' + (device.name || deviceId) + ' 的所有短信吗？此操作不可恢复！')) return;
         clearMutation.mutate();
     };
 
@@ -235,6 +247,8 @@ export default function Messages() {
                 return <span className="text-[10px] text-green-600">✓ 已发送</span>;
             case 'failed':
                 return <span className="text-[10px] text-red-600">✗ 失败</span>;
+            case 'unknown':
+                return <span className="text-[10px] text-amber-600">结果不确定，请核对</span>;
             case 'sending':
                 return <span className="text-[10px] text-gray-400">发送中...</span>;
             default:
@@ -242,7 +256,7 @@ export default function Messages() {
         }
     };
 
-    const connected = Boolean(deviceStatus?.connected);
+    const connected = Boolean(!statusError && deviceStatus?.connected);
 
     if (isLoading) {
         return (
@@ -296,6 +310,7 @@ export default function Messages() {
                 </div>}
             />
 
+            {isError && <QueryError error={error} retry={() => void refetch()}/>}
             {/* 聊天界面 */}
             <div
                 className="mt-6 flex min-h-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white">
@@ -420,6 +435,7 @@ export default function Messages() {
                         )}
                     </div>
 
+                    {messagesError && <QueryError error={messagesQueryError} retry={() => void refetchMessages()}/>}
                     {/* 消息列表 */}
                     <div className="flex-1 overflow-y-auto p-4 md:p-6">
                         {selectedPeer && currentMessages.length > 0 ? (

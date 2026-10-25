@@ -1,3 +1,6 @@
+import {useDevice} from '@/context/DeviceContext';
+import {deviceKey} from '@/api/devices';
+import QueryError from '@/components/QueryError';
 import {useMemo, useState, type ComponentProps, type ReactNode} from 'react';
 import {
     Bell,
@@ -93,7 +96,7 @@ const DEFAULT_FORM_VALUES: FormValues = {
     webhookMethod: 'POST',
     webhookContentType: 'application/json; charset=utf-8',
     webhookHeaders: '',
-    webhookBody: '{"from": "{{from}}", "content": "{{content}}", "timestamp": "{{timestamp}}"}',
+    webhookBody: '{"device_name": "{{device_name}}", "from": "{{from}}", "content": "{{content}}", "timestamp": "{{timestamp}}"}',
     emailEnabled: false,
     emailSmtpHost: '',
     emailSmtpPort: '587',
@@ -237,13 +240,14 @@ function ChannelInput(props: ComponentProps<typeof Input>) {
 }
 
 export default function NotificationChannels() {
+    const {deviceId, isActive} = useDevice();
     const queryClient = useQueryClient();
     const [selectedType, setSelectedType] = useState<ChannelType>('dingtalk');
     const [draft, setDraft] = useState<FormValues | null>(null);
 
-    const {data: channels = [], isLoading} = useQuery({
-        queryKey: ['notificationChannels'],
-        queryFn: getNotificationChannels,
+    const {data: channels = [], isLoading, isError, error, refetch} = useQuery({
+        queryKey: deviceKey(deviceId, 'notificationChannels'),
+        queryFn: ({signal}) => getNotificationChannels(deviceId, signal),
     });
 
     const serverValues = useMemo(() => channelsToFormValues(channels), [channels]);
@@ -256,22 +260,26 @@ export default function NotificationChannels() {
     };
 
     const saveMutation = useMutation({
-        mutationFn: saveNotificationChannels,
+        mutationFn: (channels: NotificationChannel[]) => saveNotificationChannels(deviceId, channels),
         onSuccess: async () => {
+            if (!isActive()) return;
             toast.success('通知渠道配置已保存');
-            await queryClient.invalidateQueries({queryKey: ['notificationChannels']});
+            await queryClient.invalidateQueries({queryKey: deviceKey(deviceId, 'notificationChannels')});
+            if (!isActive()) return;
             setDraft(null);
         },
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('保存失败:', error);
             toast.error('保存失败');
         },
     });
 
     const testMutation = useMutation({
-        mutationFn: testNotificationChannel,
-        onSuccess: () => toast.success('测试通知已发送，请检查对应渠道'),
+        mutationFn: (type: string) => testNotificationChannel(deviceId, type),
+        onSuccess: () => {if (isActive()) toast.success('测试通知已发送，请检查对应渠道');},
         onError: (error: unknown) => {
+            if (!isActive()) return;
             console.error('测试失败:', error);
             toast.error('测试失败，请检查配置');
         },
@@ -423,7 +431,7 @@ export default function NotificationChannels() {
                         <Field label="请求头（JSON）" hint="可选，必须是一个合法的 JSON 对象。">
                             <Textarea value={formValues.webhookHeaders} onChange={(event) => updateField('webhookHeaders', event.target.value)} placeholder={'{\n  "Authorization": "Bearer token"\n}'} className="min-h-28 resize-y bg-slate-50 font-mono text-xs"/>
                         </Field>
-                        <Field label="请求体模板" required hint="可使用 {{from}}、{{content}} 和 {{timestamp}} 占位符。">
+                        <Field label="请求体模板" required hint="可使用 {{device_name}}（设备别名）、{{from}}、{{content}} 和 {{timestamp}} 占位符。">
                             <Textarea value={formValues.webhookBody} onChange={(event) => updateField('webhookBody', event.target.value)} className="min-h-36 resize-y bg-slate-50 font-mono text-xs"/>
                         </Field>
                     </div>
@@ -497,6 +505,8 @@ export default function NotificationChannels() {
                 );
         }
     };
+
+    if (isError) return <QueryError error={error} retry={() => void refetch()}/>;
 
     if (isLoading) {
         return (

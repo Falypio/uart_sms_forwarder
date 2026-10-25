@@ -2,6 +2,8 @@ import {useEffect, useState} from 'react';
 import {Link, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {
     Bell,
+    Boxes,
+    KeyRound,
     ChevronRight,
     Clock3,
     LayoutDashboard,
@@ -18,12 +20,15 @@ import {toast} from 'sonner';
 import {getVersion} from '@/api/property.ts';
 import {getStatus} from '@/api/serial.ts';
 import type {DeviceStatus} from '@/api/types.ts';
+import {useQueryClient} from '@tanstack/react-query';
+import {useOptionalDevice} from '@/context/DeviceContext';
+import {deviceKey, getDevices} from '@/api/devices';
 import {cn} from '@/lib/utils.ts';
 
-const navigation = [
+const deviceNavigation = [
     {name: '概览', description: '运行状态与数据', href: '/', icon: LayoutDashboard},
     {name: '短信中心', description: '短信收发与历史', href: '/messages', icon: MessageSquareText},
-    {name: '串口控制', description: '设备与短信下发', href: '/serial', icon: Smartphone},
+    {name: '设备控制', description: '设备与短信下发', href: '/serial', icon: Smartphone},
     {name: '通知渠道', description: '管理消息推送', href: '/notifications', icon: Bell},
     {name: '计划任务', description: '自动执行任务', href: '/scheduled-tasks', icon: Clock3},
     {name: '自动飞行', description: '飞行模式策略', href: '/auto-flymode', icon: Plane},
@@ -31,6 +36,15 @@ const navigation = [
 
 export default function Layout() {
     const location = useLocation();
+    const scope = useOptionalDevice();
+    const queryClient = useQueryClient();
+    const basePath = scope ? `/devices/${encodeURIComponent(scope.deviceId)}` : '/devices';
+    const navigation = [
+        {name: '设备列表', description: '查看全部已认证设备', href: '/devices', icon: Boxes},
+        {name: '设备接入', description: '公钥与注册凭据', href: '/devices/enroll', icon: KeyRound},
+        ...(scope ? deviceNavigation.map(item => ({...item, href: basePath + (item.href === '/' ? '' : item.href)})) : []),
+    ];
+    const devicesQuery = useQuery({queryKey: ['devices'], queryFn: ({signal}) => getDevices(signal), refetchInterval: 10000});
     const navigate = useNavigate();
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -39,11 +53,17 @@ export default function Layout() {
         queryFn: getVersion,
     });
 
-    const {data: deviceStatus} = useQuery<DeviceStatus>({
-        queryKey: ['deviceStatus'],
-        queryFn: async () => getStatus() as Promise<DeviceStatus>,
+    const statusQuery = useQuery<DeviceStatus>({
+        queryKey: deviceKey(scope?.deviceId || '', 'status'),
+        queryFn: ({signal}) => getStatus(scope!.deviceId, signal),
+        enabled: Boolean(scope),
         refetchInterval: 10000,
     });
+
+    const deviceStatus = statusQuery.data;
+    const connected = Boolean(scope && !statusQuery.isError && deviceStatus?.connected);
+    const knownStatus = Boolean(scope && statusQuery.data && !statusQuery.isError);
+    const statusDot = !knownStatus ? 'bg-slate-400' : connected ? 'bg-emerald-400' : 'bg-rose-400';
 
     useEffect(() => {
         document.body.style.overflow = mobileMenuOpen ? 'hidden' : '';
@@ -53,10 +73,11 @@ export default function Layout() {
     }, [mobileMenuOpen]);
 
     const activeItem = navigation.find((item) =>
-        item.href === '/' ? location.pathname === '/' : location.pathname.startsWith(item.href),
+        location.pathname === item.href,
     ) ?? navigation[0];
 
     const handleLogout = () => {
+        queryClient.clear();
         localStorage.removeItem('token');
         localStorage.removeItem('username');
         toast.success('已安全退出');
@@ -71,7 +92,7 @@ export default function Layout() {
                     <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-[#0b2a55] bg-emerald-400"/>
                 </div>
                 <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold tracking-wide">UART 短信转发器</div>
+                    <div className="truncate text-sm font-semibold tracking-wide">SMS 设备管理中心</div>
                     <div className="mt-0.5 text-[10px] font-medium tracking-[0.12em] text-blue-100/70">设备控制台</div>
                 </div>
                 <button
@@ -85,7 +106,7 @@ export default function Layout() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-3 py-5">
-                <p className="mb-2.5 px-2.5 text-[10px] font-semibold tracking-[0.14em] text-blue-100/60">控制中心</p>
+                <p className="mb-2.5 truncate px-2.5 text-[10px] font-semibold tracking-[0.14em] text-blue-100/60">{scope ? scope.device.name || scope.deviceId : "控制中心"}</p>
                 <nav className="space-y-1" aria-label="主导航">
                     {navigation.map((item) => {
                         const Icon = item.icon;
@@ -128,20 +149,20 @@ export default function Layout() {
                         <div className="flex items-center gap-2">
                             <span className={cn(
                                 'relative flex size-2.5 rounded-full',
-                                deviceStatus?.connected ? 'bg-emerald-400' : 'bg-rose-400',
+                                statusDot,
                             )}>
-                                {deviceStatus?.connected && <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400 opacity-50"/>}
+                                {connected && <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400 opacity-50"/>}
                             </span>
                             <div>
                                 <p className="text-[11px] font-semibold text-slate-100">
-                                    {deviceStatus?.connected ? '设备运行中' : '设备未连接'}
+                                    {scope ? statusQuery.isError ? '状态读取失败' : !knownStatus ? '同步状态中' : connected ? '设备运行中' : '设备未连接' : '尚未选择设备'}
                                 </p>
                                 <p className="mt-0.5 max-w-[130px] truncate font-mono text-[9px] text-blue-100/60">
-                                    {deviceStatus?.port_name || '等待串口连接'}
+                                    {scope ? scope.device.accessMode === 'mqtt' ? '蜂窝 MQTT' : deviceStatus?.port_name || '等待 USB 连接' : '从设备列表进入控制台'}
                                 </p>
                             </div>
                         </div>
-                        <RadioTower className={cn('size-4', deviceStatus?.connected ? 'text-blue-300' : 'text-blue-200/25')}/>
+                        <RadioTower className={cn('size-4', connected ? 'text-blue-300' : 'text-blue-200/25')}/>
                     </div>
                 </div>
                 <div className="flex items-center justify-between px-1">
@@ -186,20 +207,32 @@ export default function Layout() {
                         >
                             <Menu className="size-5"/>
                         </button>
-                        <div className="flex min-w-0 items-center gap-2 text-xs font-medium text-slate-400">
-                            <span>控制中心</span>
+                        <div className="hidden min-w-0 items-center gap-2 text-xs font-medium text-slate-400 md:flex">
+                            <Link to="/devices" className="hover:text-blue-700">设备管理</Link>
                             <ChevronRight className="size-3"/>
                             <span className="text-slate-700">{activeItem.name}</span>
                         </div>
                         <div className="ml-auto flex items-center gap-3">
+                            {scope && <select
+                                aria-label="切换设备"
+                                value={scope.deviceId}
+                                onChange={(event) => navigate({
+                                    pathname: location.pathname.replace(/^\/devices\/[^/]+/, `/devices/${encodeURIComponent(event.target.value)}`),
+                                    search: location.search,
+                                    hash: location.hash,
+                                })}
+                                className="h-9 max-w-[150px] truncate rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 sm:max-w-[220px]"
+                            >
+                                {(devicesQuery.data?.some(d => d.id === scope.deviceId) ? devicesQuery.data : [scope.device, ...(devicesQuery.data || [])]).map(d => <option key={d.id} value={d.id}>{d.name && d.name !== d.id && d.name !== d.features?.imei ? d.name : '未命名设备'}</option>)}
+                            </select>}
                             <div className={cn(
                                 'hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold sm:flex',
-                                deviceStatus?.connected
+                                !knownStatus ? 'border-slate-200 bg-slate-50 text-slate-500' : connected
                                     ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                                     : 'border-rose-200 bg-rose-50 text-rose-700',
                             )}>
-                                <span className={cn('size-1.5 rounded-full', deviceStatus?.connected ? 'bg-emerald-500' : 'bg-rose-500')}/>
-                                {deviceStatus?.connected ? '链路正常' : '链路中断'}
+                                <span className={cn('size-1.5 rounded-full', statusDot)}/>
+                                {scope ? !knownStatus ? '状态未知' : connected ? '链路正常' : '设备离线' : '管理控制台'}
                             </div>
                             <div className="flex size-8 items-center justify-center rounded-full bg-[#0b2a55] text-[11px] font-bold text-white">
                                 {(localStorage.getItem('username') || 'U').slice(0, 1).toUpperCase()}
@@ -210,7 +243,7 @@ export default function Layout() {
 
                 <main className={cn(
                     'app-content mx-auto w-full max-w-[1320px] px-4 py-6 sm:px-6 lg:px-8 xl:px-10',
-                    location.pathname === '/' && 'lg:h-[calc(100vh-60px)] lg:overflow-hidden',
+                    scope && location.pathname === basePath && 'lg:h-[calc(100vh-60px)] lg:overflow-hidden',
                 )}>
                     <Outlet/>
                 </main>
