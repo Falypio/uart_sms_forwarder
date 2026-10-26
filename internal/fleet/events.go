@@ -211,6 +211,10 @@ func validateChannel(c models.NotificationChannelConfig) error {
 	if !c.Enabled {
 		return nil
 	}
+	if c.Type == "bark" {
+		_, err := service.BarkPushURL(c.Config)
+		return err
+	}
 	required := map[string][]string{"dingtalk": {"secretKey"}, "wecom": {"secretKey"}, "feishu": {"secretKey"}, "webhook": {"url", "body", "contentType"}, "email": {"smtpHost", "username", "password", "from", "to"}, "telegram": {"apiToken", "userid"}}
 	fields, ok := required[c.Type]
 	if !ok {
@@ -262,6 +266,8 @@ func (m *Manager) notify(ctx context.Context, c models.NotificationChannelConfig
 		return err
 	}
 	switch c.Type {
+	case "bark":
+		return m.notifier.SendBarkByConfig(ctx, c.Config, msg.String())
 	case "dingtalk":
 		return m.notifier.SendDingTalkByConfig(ctx, c.Config, msg.String())
 	case "wecom":

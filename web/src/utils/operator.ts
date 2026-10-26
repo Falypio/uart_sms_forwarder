@@ -10,7 +10,7 @@ const simOperators: Record<string, string> = {
     '46001': '中国联通', '46006': '中国联通', '46009': '中国联通',
     '46003': '中国电信', '46005': '中国电信', '46011': '中国电信',
     '46015': '中国广电',
-    '53001': 'One NZ（新西兰）', '53004': 'One NZ（新西兰）',
+    '53001': 'One NZ(新西兰)', '53004': 'One NZ(新西兰)',
 };
 
 export function describeOperator(mobile?: Partial<MobileInfo>): string {
@@ -21,5 +21,5 @@ export function describeOperator(mobile?: Partial<MobileInfo>): string {
     const imsi = typeof mobile.imsi === 'string' ? mobile.imsi.trim() : '';
     if (!/^\d{5,15}$/.test(imsi)) return '等待运营商信息';
     const inferred = simOperators[imsi.slice(0, 5)];
-    return inferred ? `${inferred}（SIM 推断）` : '未识别运营商';
+    return inferred || '未识别运营商';
 }

@@ -237,12 +237,14 @@ export default function SerialControl() {
 
                                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                                         {[
-                                            ['ICCID', connected ? mobile?.iccid || unavailable : unavailable],
-                                            ['IMSI', connected ? mobile?.imsi || unavailable : unavailable],
+                                            ['ICCID', connected ? mobile?.iccid : undefined],
+                                            ['IMSI', connected ? mobile?.imsi : undefined],
                                         ].map(([label, value]) => (
                                             <div key={label} className="min-w-0 rounded-lg bg-slate-50 px-3.5 py-3">
                                                 <p className="text-[10px] font-semibold text-slate-400">{label}</p>
-                                                <p className="mt-1 truncate font-mono text-xs font-semibold text-slate-700" title={String(value)}>{value}</p>
+                                                <p className="mt-1 truncate font-mono text-xs font-semibold text-slate-700">
+                                                    <SensitiveValue value={value} label={`${device.name || deviceId} ${label}`} fallback={unavailable}/>
+                                                </p>
                                             </div>
                                         ))}
                                     </div>

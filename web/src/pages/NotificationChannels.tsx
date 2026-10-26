@@ -39,9 +39,14 @@ type EnabledField =
     | 'feishuEnabled'
     | 'webhookEnabled'
     | 'emailEnabled'
-    | 'telegramEnabled';
+    | 'telegramEnabled'
+    | 'barkEnabled';
 
 interface FormValues {
+    barkEnabled: boolean;
+    barkServerType: string;
+    barkServerUrl: string;
+    barkKey: string;
     dingtalkEnabled: boolean;
     dingtalkSecretKey: string;
     dingtalkSignSecret: string;
@@ -83,6 +88,10 @@ interface ChannelDefinition {
 }
 
 const DEFAULT_FORM_VALUES: FormValues = {
+    barkEnabled: false,
+    barkServerType: 'official',
+    barkServerUrl: '',
+    barkKey: '',
     dingtalkEnabled: false,
     dingtalkSecretKey: '',
     dingtalkSignSecret: '',
@@ -115,6 +124,14 @@ const DEFAULT_FORM_VALUES: FormValues = {
 };
 
 const CHANNELS: ChannelDefinition[] = [
+    {
+        type: 'bark',
+        name: 'Bark',
+        description: 'iOS 推送通知，支持官方或自定义服务器',
+        enabledField: 'barkEnabled',
+        icon: Bell,
+        docsUrl: 'https://bark.day.app/#/tutorial',
+    },
     {
         type: 'dingtalk',
         name: '钉钉',
@@ -180,6 +197,11 @@ function channelsToFormValues(channels: NotificationChannel[]): FormValues {
     const webhook = find('webhook');
     const email = find('email');
     const telegram = find('telegram');
+    const bark = find('bark');
+    values.barkEnabled = bark?.enabled ?? false;
+    values.barkServerType = getStringConfig(bark, 'serverType', 'official');
+    values.barkServerUrl = getStringConfig(bark, 'serverUrl');
+    values.barkKey = getStringConfig(bark, 'key');
 
     values.dingtalkEnabled = dingtalk?.enabled ?? false;
     values.dingtalkSecretKey = getStringConfig(dingtalk, 'secretKey');
@@ -308,6 +330,29 @@ export default function NotificationChannels() {
         }
 
         const nextChannels: NotificationChannel[] = [];
+        if (formValues.barkEnabled) {
+            let validServer = true;
+            if (formValues.barkServerType === 'custom') {
+                try {
+                    const url = new URL(formValues.barkServerUrl.trim());
+                    validServer = ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname) && !url.username && !url.password && !url.search && !url.hash;
+                } catch {
+                    validServer = false;
+                }
+            }
+            if (!formValues.barkKey.trim() || !validServer) {
+                toast.error('请填写 Bark Key 和有效的 HTTP/HTTPS 服务器地址');
+                setSelectedType('bark');
+                return;
+            }
+        }
+        if (formValues.barkEnabled || formValues.barkKey || formValues.barkServerUrl) {
+            nextChannels.push({
+                type: 'bark',
+                enabled: formValues.barkEnabled,
+                config: {serverType: formValues.barkServerType, serverUrl: formValues.barkServerUrl.trim(), key: formValues.barkKey.trim()},
+            });
+        }
         if (formValues.dingtalkEnabled || formValues.dingtalkSecretKey) {
             nextChannels.push({
                 type: 'dingtalk',
@@ -465,6 +510,28 @@ export default function NotificationChannels() {
                         </div>
                         <Field label="邮件主题">
                             <ChannelInput value={formValues.emailSubject} onChange={(event) => updateField('emailSubject', event.target.value)} className="bg-slate-50 border-slate-200 focus:bg-white focus:border-blue-500"/>
+                        </Field>
+                    </div>
+                );
+            case 'bark':
+                return (
+                    <div className="grid gap-5">
+                        <Field label="服务器" required>
+                            <Select value={formValues.barkServerType} onValueChange={(value) => updateField('barkServerType', value)}>
+                                <SelectTrigger className={inputClass}><SelectValue/></SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="official">官方服务器（https://api.day.app）</SelectItem>
+                                    <SelectItem value="custom">自定义服务器</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </Field>
+                        {formValues.barkServerType === 'custom' && (
+                            <Field label="服务器地址" required hint="填写服务器基础地址，可包含路径前缀；无需填写 /push 或 Key。">
+                                <ChannelInput type="url" value={formValues.barkServerUrl} onChange={(event) => updateField('barkServerUrl', event.target.value)} placeholder="https://bark.example.com" className={inputClass}/>
+                            </Field>
+                        )}
+                        <Field label="Key" required hint="填写 Bark App 中所选服务器对应的 Key。短信正文、设备、来源和时间沿用现有格式。">
+                            <ChannelInput type="password" value={formValues.barkKey} onChange={(event) => updateField('barkKey', event.target.value)} placeholder="Bark 推送 Key" className={inputClass}/>
                         </Field>
                     </div>
                 );

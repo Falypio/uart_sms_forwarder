@@ -144,6 +144,8 @@ func (h *PropertyHandler) TestNotificationChannel(c *echo.Context) error {
 
 	var sendErr error
 	switch targetChannel.Type {
+	case "bark":
+		sendErr = h.notifier.SendBarkByConfig(ctx, targetChannel.Config, message)
 	case "dingtalk":
 		sendErr = h.notifier.SendDingTalkByConfig(ctx, targetChannel.Config, message)
 	case "wecom":

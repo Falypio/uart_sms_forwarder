@@ -100,6 +100,8 @@ func (s *SerialService) sendNotificationMessage(ctx context.Context, msg Notific
 
 		var sendErr error
 		switch channel.Type {
+		case "bark":
+			sendErr = s.notifier.SendBarkByConfig(ctx, channel.Config, message)
 		case "dingtalk":
 			sendErr = s.notifier.SendDingTalkByConfig(ctx, channel.Config, message)
 		case "wecom":
