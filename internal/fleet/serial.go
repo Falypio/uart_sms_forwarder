@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.bug.st/serial"
+	"go.bug.st/serial/enumerator"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -115,6 +116,29 @@ func serialIdentity(raw json.RawMessage) (string, map[string]any, error) {
 	return id, event, nil
 }
 
+// autoDetectPorts enumerates candidate serial ports when neither Port nor Ports
+// is configured. Only USB-backed ports are returned: the device is always a USB
+// CDC device, while virtual ports (Bluetooth links, legacy COM) can never carry
+// the SMS protocol and would each burn a handshake timeout on every scan.
+// Returning a USB port list also means the device keeps working after it is
+// moved to a different USB socket, where Windows assigns new COM numbers.
+func (m *Manager) autoDetectPorts() []string {
+	details, err := enumerator.GetDetailedPortsList()
+	if err != nil {
+		m.log.Warn("serial enumeration failed", zap.Error(err))
+		return nil
+	}
+	ports := make([]string, 0, len(details))
+	for _, d := range details {
+		if !d.IsUSB {
+			continue
+		}
+		ports = append(ports, d.Name)
+	}
+	m.log.Debug("serial auto-detect", zap.Strings("ports", ports))
+	return ports
+}
+
 func (m *Manager) scanSerial(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(m.Config.Serial.ScanIntervalSeconds) * time.Second)
 	defer ticker.Stop()
@@ -124,11 +148,7 @@ func (m *Manager) scanSerial(ctx context.Context) {
 			ports = []string{m.Config.Serial.Port}
 		}
 		if len(ports) == 0 {
-			var err error
-			ports, err = serial.GetPortsList()
-			if err != nil {
-				m.log.Warn("serial enumeration failed", zap.Error(err))
-			}
+			ports = m.autoDetectPorts()
 		}
 		for _, path := range ports {
 			m.mu.Lock()
