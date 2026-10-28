@@ -3,6 +3,8 @@ return {
     access_mode = "serial", -- "serial" or "mqtt"; effective after reboot
     device_id = "", -- empty: use IMEI; use only letters, digits, _ and -
     device_name = "Air780",
+    phone_number = "", -- SIM 未保存本机号码时用于展示，如 "13250574785"
+    usb_net = true, -- 开机自动开启 RNDIS 4G 共享（会让串口短暂断开重连）
     uart_id = uart.VUART_0,
     heartbeat_ms = 60000,
     debug_sms_content = true, -- prints plaintext SMS to local debug log

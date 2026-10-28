@@ -50,13 +50,50 @@ if wdt then
 end
 if not mqtt_mode then uart.setup(uartid, 115200, 8, 1) end
 
-local function read_phone_number()
+-- 可选：开机自动开启 USB 网卡 RNDIS（4G 共享给主机），由 device_config.lua 的 usb_net 控制。
+-- mobile.config(CONF_USB_ETHERNET) 不持久，每次开机都要重新设置；设置后必须重新枚举 USB 才生效。
+-- 重新枚举会让主机侧串口短暂断开，因此重置后再做一次 uart.setup。
+local function enable_usb_net()
+    sys.wait(4000)
+    log.info("usbnet", "进入飞行模式设置 RNDIS")
+    mobile.flymode(0, true)
+    sys.wait(800)
+    local ok = mobile.config(mobile.CONF_USB_ETHERNET, 0x03) -- 开启 + NAT 模式
+    log.info("usbnet", "mobile.config(CONF_USB_ETHERNET, 0x03) =", ok)
+    mobile.flymode(0, false)
+    sys.wait(3000)
+    if ok then
+        log.info("usbnet", "复位 USB 使 RNDIS 生效")
+        pm.power(pm.USB, false)
+        sys.wait(600)
+        pm.power(pm.USB, true)
+        sys.wait(3000)
+        if not mqtt_mode then uart.setup(uartid, 115200, 8, 1) end
+        log.info("usbnet", "USB 已重新枚举，串口重新初始化")
+    end
+end
+if config.usb_net then sys.taskInit(enable_usb_net) end
+
+-- 本机号码：优先读 SIM 卡 EF_MSISDN；读不到时使用 device_config.lua 的 phone_number 兜底
+local function device_number()
     local number = mobile.number(0)
     if number and number ~= "" and number ~= "unknown" then
+        return number
+    end
+    local fallback = config.phone_number
+    if type(fallback) == "string" and fallback ~= "" then
+        return fallback
+    end
+    return ""
+end
+
+local function read_phone_number()
+    local number = device_number()
+    if number ~= "" then
         log.info("phone_number", "本机手机号:", number)
         return number
     end
-    log.warn("phone_number", "未读取到手机号，SIM卡可能未保存本机号码")
+    log.warn("phone_number", "未读取到手机号，SIM卡可能未保存本机号码，且未配置 phone_number")
     return ""
 end
 
@@ -72,7 +109,7 @@ function get_mobile_info()
     return {
         sim_ready = iccid ~= nil and iccid ~= "" and iccid ~= "unknown",
         sms_ready = sms_ready, iccid = iccid or "unknown", imsi = mobile.imsi() or "unknown",
-        number = mobile.number(0) or "", csq = csq, rssi = mobile.rssi() or -113,
+        number = device_number(), csq = csq, rssi = mobile.rssi() or -113,
         rsrp = mobile.rsrp() or -140, rsrq = mobile.rsrq() or -20,
         signal_level = level, signal_desc = level == 0 and "无信号" or (level >= 20 and "强" or (level >= 10 and "中" or "弱")),
         is_registered = stat == 1 or stat == 5 or stat == 6 or stat == 7,
